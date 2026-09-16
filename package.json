@@ -1,11 +1,14 @@
 {
-  "name": "sfo2-railway-probe",
+  "name": "baseops-sfo2-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Throwaway probe: can a US-region Railway service reach Paragon's API?",
+  "description": "Lead capture and payment backend for the Salsa Fever On2 promo funnel",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.14"
   },
   "engines": {
     "node": ">=20"
