@@ -193,16 +193,24 @@ function buildEmail(lead) {
   return { subject, html, text };
 }
 
+/* Timeouts are not optional here. Without them nodemailer waits minutes on a
+   blocked port, which is how /lead first came to hang with no response. */
+function makeTransport(port) {
+  return nodemailer.createTransport({
+    host: CFG.smtpHost,
+    port: port,
+    secure: port === 465,
+    requireTLS: port !== 465,
+    auth: { user: CFG.smtpUser, pass: CFG.smtpPass },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 12000
+  });
+}
+
 let transporter = null;
 function mailer() {
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: CFG.smtpHost,
-      port: CFG.smtpPort,
-      secure: CFG.smtpPort === 465,
-      auth: { user: CFG.smtpUser, pass: CFG.smtpPass }
-    });
-  }
+  if (!transporter) transporter = makeTransport(CFG.smtpPort);
   return transporter;
 }
 
@@ -361,6 +369,40 @@ const server = http.createServer(async (req, res) => {
     return json(200, await connectivityProbe());
   }
 
+  /* Which dependency is actually failing? Tries SMTP on both common ports and
+     does a read-only Airtable call. Sends no mail and writes no records. */
+  if (req.method === 'GET' && url.pathname === '/selftest') {
+    const smtp = {};
+    for (const port of [465, 587]) {
+      const started = Date.now();
+      try {
+        await makeTransport(port).verify();
+        smtp['port_' + port] = { ok: true, ms: Date.now() - started };
+      } catch (err) {
+        smtp['port_' + port] = {
+          ok: false,
+          ms: Date.now() - started,
+          error: String(err && err.message).slice(0, 200),
+          code: (err && err.code) || null
+        };
+      }
+    }
+
+    let airtable;
+    const aStarted = Date.now();
+    try {
+      const r = await fetch(
+        'https://api.airtable.com/v0/' + CFG.airtableBase + '/' + CFG.airtableTable + '?maxRecords=1',
+        { headers: { 'Authorization': 'Bearer ' + CFG.airtableToken } });
+      const t = await r.text();
+      airtable = { ok: r.ok, status: r.status, ms: Date.now() - aStarted, body: t.slice(0, 200) };
+    } catch (err) {
+      airtable = { ok: false, ms: Date.now() - aStarted, error: String(err && err.message) };
+    }
+
+    return json(200, { smtp, airtable, smtp_host: CFG.smtpHost, smtp_port_in_use: CFG.smtpPort });
+  }
+
   if (req.method === 'POST' && url.pathname === '/lead') {
     let parsed;
     try {
@@ -372,30 +414,33 @@ const server = http.createServer(async (req, res) => {
 
     const lead = normalise(parsed);
 
-    /* Email and Airtable run together. Neither is allowed to fail the request:
-       the student is mid-signup and a logging problem must not look to them
-       like their submission failed. */
-    const [emails, airtable] = await Promise.all([
-      sendLeadEmails(lead).catch(err => [{ ok: false, error: String(err && err.message) }]),
-      writeAirtable(lead)
-    ]);
-
-    const anyEmail = emails.some(e => e.ok);
-    if (!anyEmail) console.error('LEAD EMAIL FAILED', lead.invoice_number, JSON.stringify(emails));
-    if (!airtable.ok) console.error('LEAD AIRTABLE FAILED', lead.invoice_number, airtable.error);
-    console.log('lead', lead.invoice_number, 'valid=' + lead.valid,
-      'email=' + emails.filter(e => e.ok).length + '/' + emails.length,
-      'airtable=' + (airtable.ok ? 'ok' : 'fail'));
-
-    /* payment_url stays null while checkout runs through WellnessLiving.
-       /paragon-token will populate it once the Paragon path is switched on. */
-    return json(200, {
+    /* Respond FIRST, then do the side effects.
+       The student is mid-signup and waiting on a redirect to checkout — they
+       must never wait on SMTP. An earlier version awaited both and hung for
+       minutes when the mail port stalled, leaving the form spinning.
+       payment_url stays null while checkout runs through WellnessLiving. */
+    json(200, {
       ok: true,
       received: lead.valid,
       errors: lead.errors,
       invoice_number: lead.invoice_number,
       payment_url: null
     });
+
+    Promise.allSettled([
+      sendLeadEmails(lead),
+      writeAirtable(lead)
+    ]).then(([mailRes, airRes]) => {
+      const emails = mailRes.status === 'fulfilled' ? mailRes.value : [{ ok: false, error: String(mailRes.reason && mailRes.reason.message) }];
+      const airtable = airRes.status === 'fulfilled' ? airRes.value : { ok: false, error: String(airRes.reason && airRes.reason.message) };
+
+      if (!emails.some(e => e.ok)) console.error('LEAD EMAIL FAILED', lead.invoice_number, JSON.stringify(emails));
+      if (!airtable.ok) console.error('LEAD AIRTABLE FAILED', lead.invoice_number, airtable.error);
+      console.log('lead', lead.invoice_number, 'valid=' + lead.valid,
+        'email=' + emails.filter(e => e.ok).length + '/' + emails.length,
+        'airtable=' + (airtable.ok ? 'ok' : 'fail'));
+    });
+    return;
   }
 
   json(404, { ok: false, error: 'not found' });
