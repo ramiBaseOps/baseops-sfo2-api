@@ -1,0 +1,13 @@
+{
+  "name": "sfo2-railway-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Throwaway probe: can a US-region Railway service reach Paragon's API?",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
