@@ -28,6 +28,10 @@ const CFG = {
   mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || '',
   leadTo: (process.env.LEAD_TO || '').split(',').map(s => s.trim()).filter(Boolean),
 
+  /* Mail goes out over HTTP, not SMTP — Railway blocks outbound 465 and 587
+     (both ETIMEDOUT, confirmed via /selftest on 2026-09-16). */
+  resendKey: process.env.RESEND_API_KEY || '',
+
   airtableToken: process.env.AIRTABLE_TOKEN || '',
   airtableBase: process.env.AIRTABLE_BASE || '',
   airtableTable: process.env.AIRTABLE_TABLE || '',
@@ -194,7 +198,9 @@ function buildEmail(lead) {
 }
 
 /* Timeouts are not optional here. Without them nodemailer waits minutes on a
-   blocked port, which is how /lead first came to hang with no response. */
+   blocked port, which is how /lead first came to hang with no response.
+   Kept only for /selftest — Railway blocks outbound SMTP on 465 and 587, so
+   mail actually goes out over HTTP via Resend. */
 function makeTransport(port) {
   return nodemailer.createTransport({
     host: CFG.smtpHost,
@@ -208,24 +214,42 @@ function makeTransport(port) {
   });
 }
 
-let transporter = null;
-function mailer() {
-  if (!transporter) transporter = makeTransport(CFG.smtpPort);
-  return transporter;
-}
-
 /* One send per recipient rather than one message with several To: addresses.
    A bounce for one address then cannot suppress delivery to the other. */
 async function sendLeadEmails(lead) {
+  if (!CFG.resendKey) {
+    return CFG.leadTo.map(to => ({ to, ok: false, error: 'RESEND_API_KEY not set' }));
+  }
   const { subject, html, text } = buildEmail(lead);
-  const results = await Promise.allSettled(
-    CFG.leadTo.map(to => mailer().sendMail({ from: CFG.mailFrom, to, subject, html, text }))
-  );
-  return CFG.leadTo.map((to, i) => ({
-    to,
-    ok: results[i].status === 'fulfilled',
-    error: results[i].status === 'rejected' ? String(results[i].reason && results[i].reason.message) : null
-  }));
+
+  const sendOne = async (to) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10000);
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + CFG.resendKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ from: CFG.mailFrom, to: [to], subject, html, text }),
+        signal: ac.signal
+      });
+      const body = await res.json().catch(() => ({}));
+      return {
+        to,
+        ok: res.ok,
+        id: body.id || null,
+        error: res.ok ? null : (JSON.stringify(body).slice(0, 200) || ('HTTP ' + res.status))
+      };
+    } catch (err) {
+      return { to, ok: false, error: String(err && err.message) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  return Promise.all(CFG.leadTo.map(sendOne));
 }
 
 /* --------------------------------------------------------------- airtable */
@@ -345,8 +369,8 @@ const server = http.createServer(async (req, res) => {
     /* Reports which env var NAMES are present — never their values. Exists
        because "configured: false" alone can't distinguish a typo from a
        variable set on the wrong service or a deploy that never picked it up. */
-    const expected = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM',
-      'LEAD_TO', 'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
+    const expected = ['RESEND_API_KEY', 'MAIL_FROM', 'LEAD_TO',
+      'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
       'ALLOWED_ORIGINS', 'OFFER_PRICE'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
@@ -355,7 +379,8 @@ const server = http.createServer(async (req, res) => {
       service: 'baseops-sfo2-api',
       ok: true,
       configured: {
-        smtp: Boolean(CFG.smtpUser && CFG.smtpPass),
+        email: Boolean(CFG.resendKey),
+        mail_from: CFG.mailFrom || null,
         recipients: CFG.leadTo.length,
         airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable)
       },
@@ -369,22 +394,39 @@ const server = http.createServer(async (req, res) => {
     return json(200, await connectivityProbe());
   }
 
-  /* Which dependency is actually failing? Tries SMTP on both common ports and
-     does a read-only Airtable call. Sends no mail and writes no records. */
+  /* Which dependency is actually failing? Read-only: sends no mail, writes no
+     records. `?smtp=1` additionally retries the blocked SMTP ports, which is
+     only useful for re-confirming the Railway block. */
   if (req.method === 'GET' && url.pathname === '/selftest') {
     const smtp = {};
-    for (const port of [465, 587]) {
-      const started = Date.now();
+    if (url.searchParams.get('smtp') === '1') {
+      for (const port of [465, 587]) {
+        const started = Date.now();
+        try {
+          await makeTransport(port).verify();
+          smtp['port_' + port] = { ok: true, ms: Date.now() - started };
+        } catch (err) {
+          smtp['port_' + port] = {
+            ok: false,
+            ms: Date.now() - started,
+            error: String(err && err.message).slice(0, 200),
+            code: (err && err.code) || null
+          };
+        }
+      }
+    }
+
+    let resend = { ok: false, error: 'RESEND_API_KEY not set' };
+    if (CFG.resendKey) {
+      const rStarted = Date.now();
       try {
-        await makeTransport(port).verify();
-        smtp['port_' + port] = { ok: true, ms: Date.now() - started };
+        const rr = await fetch('https://api.resend.com/domains', {
+          headers: { 'Authorization': 'Bearer ' + CFG.resendKey }
+        });
+        const t = await rr.text();
+        resend = { ok: rr.ok, status: rr.status, ms: Date.now() - rStarted, body: t.slice(0, 300) };
       } catch (err) {
-        smtp['port_' + port] = {
-          ok: false,
-          ms: Date.now() - started,
-          error: String(err && err.message).slice(0, 200),
-          code: (err && err.code) || null
-        };
+        resend = { ok: false, ms: Date.now() - rStarted, error: String(err && err.message) };
       }
     }
 
@@ -400,7 +442,7 @@ const server = http.createServer(async (req, res) => {
       airtable = { ok: false, ms: Date.now() - aStarted, error: String(err && err.message) };
     }
 
-    return json(200, { smtp, airtable, smtp_host: CFG.smtpHost, smtp_port_in_use: CFG.smtpPort });
+    return json(200, { resend, airtable, mail_from: CFG.mailFrom, recipients: CFG.leadTo, smtp });
   }
 
   if (req.method === 'POST' && url.pathname === '/lead') {
@@ -448,7 +490,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log('baseops-sfo2-api listening on ' + PORT);
-  console.log('smtp=' + (CFG.smtpUser ? 'configured' : 'MISSING') +
+  console.log('email=' + (CFG.resendKey ? 'resend' : 'MISSING') +
+    ' from=' + (CFG.mailFrom || 'MISSING') +
     ' recipients=' + CFG.leadTo.length +
     ' airtable=' + (CFG.airtableToken ? 'configured' : 'MISSING'));
 });
