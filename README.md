@@ -1,6 +1,26 @@
-# SFO2 Railway probe
+# baseops-sfo2-api
 
-Throwaway. Answers one question: **can a US-region Railway service reach Paragon's API?**
+Backend for the Salsa Fever On2 promo funnel, hosted on Railway.
+
+**Phase 1 (current): a connectivity probe.** Everything below describes it. If the probe passes,
+this same service grows into the real backend and the probe code is replaced:
+
+| Endpoint | Purpose | Status |
+|---|---|---|
+| `GET /` | connectivity probe | **live** |
+| `POST /lead` | lead → Zoho email + Airtable row, issues `SFO2-XXXXXX` | planned, replaces n8n |
+| `POST /paragon-token` | mints a Paragon `SecureToken` server-side | planned, blocked on this probe |
+| `POST /paragon-callback` | receives Paragon's transaction callback | planned |
+
+> **Credentials go in Railway environment variables — never in this repo.** `.env` is
+> gitignored. The n8n setup we are replacing kept the Paragon username and password inside a
+> workflow file that exported to disk in plaintext; do not recreate that.
+
+---
+
+## Phase 1 — the probe
+
+Answers one question: **can a US-region Railway service reach Paragon's API?**
 
 n8n Cloud could not — it egressed from London (`9.223.34.63`) and Paragon's edge reset every
 connection, including plain unauthenticated GETs. Paragon's own support attributed this to

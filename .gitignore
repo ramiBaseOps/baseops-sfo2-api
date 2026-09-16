@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+.DS_Store
+.vscode/
+.idea/
+
+*.pem
+*.key
+*.p12
+credentials.json
+secrets.json
