@@ -40,8 +40,24 @@ const CFG = {
     'https://www.baseops.tech,https://baseops.tech')
     .split(',').map(s => s.trim()).filter(Boolean),
 
-  price: Number(process.env.OFFER_PRICE || 75)
+  price: Number(process.env.OFFER_PRICE || 75),
+
+  /* Paragon hosted checkout. Credentials come from PUREsight →
+     Hosted Page → Misc → Generate. Generating a new pair invalidates the old
+     one, so retrieve rather than regenerate if they already exist.
+     While any of these are blank, payment_url comes back null and the landing
+     page falls through to WellnessLiving. */
+  paragonUser: process.env.PARAGON_HP_USER || '',
+  paragonPass: process.env.PARAGON_HP_PASS || '',
+  paragonMerchantKey: process.env.PARAGON_MERCHANT_KEY || '',
+  paragonTokenUrl: process.env.PARAGON_TOKEN_URL ||
+    'https://stage.paragonsolutions.com/api/v2/hp/token',
+  paragonPayBase: process.env.PARAGON_PAY_BASE ||
+    'https://stage.shpp.paragonsolutions.com/payment'
 };
+
+const paragonConfigured = () =>
+  Boolean(CFG.paragonUser && CFG.paragonPass && CFG.paragonMerchantKey);
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -295,6 +311,203 @@ async function writeAirtable(lead) {
   }
 }
 
+/* ---------------------------------------------------------------- paragon */
+
+/* Mint a short-lived SecureToken. Credentials go server-side only — the
+   browser never sees them, which is the whole reason this runs here.
+   Token lifetime is 5 minutes per the July 2026 integration guide; the student
+   is redirected immediately, so that is ample. */
+async function mintParagonToken(lead) {
+  if (!paragonConfigured()) return { token: null, error: 'paragon not configured' };
+  if (!lead.valid) return { token: null, error: 'lead failed validation' };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 9000);
+  try {
+    const res = await fetch(CFG.paragonTokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: CFG.paragonUser,
+        password: CFG.paragonPass,
+        /* Binds the amount to the token so it cannot be edited in the URL. */
+        extendedInfo: { transactionInfo: { amount: CFG.price.toFixed(2) } }
+      }),
+      signal: ac.signal
+    });
+
+    const raw = await res.text();
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (e) { parsed = raw; }
+
+    if (!res.ok) {
+      return { token: null, error: 'HTTP ' + res.status + ' ' + String(raw).slice(0, 200) };
+    }
+    /* Response shape unconfirmed against a live credential — accept the
+       documented key plus plausible variants, and a bare string. */
+    const token = (parsed && (parsed.token || parsed.Token || parsed.secureToken || parsed.SecureToken)) ||
+      (typeof parsed === 'string' && parsed.trim() && !parsed.includes(' ') ? parsed.trim() : null);
+
+    if (!token) return { token: null, error: 'no token in response: ' + String(raw).slice(0, 200) };
+    return { token, error: null };
+  } catch (err) {
+    return { token: null, error: String(err && err.message) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildPaymentUrl(token, lead) {
+  const q = new URLSearchParams({
+    SecureToken: token,
+    MerchantKey: CFG.paragonMerchantKey,
+    Amount: CFG.price.toFixed(2),
+    InvoiceNumber: lead.invoice_number,   /* join key back to the Airtable row */
+    EchoID: lead.source,                  /* echoed back on the callback */
+    Email: lead.email,
+    BillingFirstName: lead.first_name,
+    BillingLastName: lead.last_name
+  });
+  return CFG.paragonPayBase + '?' + q.toString();
+}
+
+/* Find the Leads row for a reference and mark it paid.
+   The n8n version of this once updated the WRONG row because a filter was
+   silently ignored, so the returned record's Reference is re-checked here
+   before anything is written. */
+async function markLeadPaid(invoiceNumber, payment) {
+  if (!CFG.airtableToken || !invoiceNumber) {
+    return { ok: false, error: 'missing token or reference' };
+  }
+  const baseUrl = 'https://api.airtable.com/v0/' + CFG.airtableBase + '/' + CFG.airtableTable;
+  const formula = '{Reference}="' + invoiceNumber.replace(/"/g, '') + '"';
+  const auth = { 'Authorization': 'Bearer ' + CFG.airtableToken };
+
+  try {
+    const findRes = await fetch(baseUrl + '?maxRecords=1&filterByFormula=' + encodeURIComponent(formula), { headers: auth });
+    const found = await findRes.json();
+    const rec = (found.records || [])[0];
+
+    if (!rec) return { ok: false, error: 'no row for ' + invoiceNumber };
+    if (String(rec.fields && rec.fields.Reference).trim() !== invoiceNumber.trim()) {
+      return { ok: false, error: 'reference mismatch — refusing to update ' + rec.id };
+    }
+
+    const fields = {
+      'Status': payment.approved ? 'paid' : 'payment_issue',
+      'Paid At': payment.received_at
+    };
+    if (payment.pnref) fields['Payment Ref'] = payment.pnref;
+
+    const upRes = await fetch(baseUrl, {
+      method: 'PATCH',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, auth),
+      body: JSON.stringify({ records: [{ id: rec.id, fields }], typecast: true })
+    });
+    const upBody = await upRes.json().catch(() => ({}));
+    return { ok: upRes.ok, id: rec.id, error: upRes.ok ? null : JSON.stringify(upBody).slice(0, 200) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message) };
+  }
+}
+
+/* Paragon documents the Callback URL setting but not its payload. Parse
+   defensively across plausible spellings and keep the raw body for the email,
+   so the first real transaction tells us the true shape. */
+function parseCallback(body, query) {
+  const bag = {};
+  for (const src of [query, body]) {
+    if (src && typeof src === 'object') {
+      for (const [k, v] of Object.entries(src)) {
+        if (v !== null && typeof v === 'object') continue;
+        bag[String(k).toLowerCase()] = v;
+      }
+    }
+  }
+  const pick = (...names) => {
+    for (const n of names) {
+      const v = bag[n.toLowerCase()];
+      if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+    }
+    return null;
+  };
+  const result = pick('result', 'respcode', 'responsecode');
+  return {
+    invoice_number: pick('invoicenumber', 'invnum', 'invoice_number', 'invoice'),
+    echo_id: pick('echoid', 'echo_id'),
+    pnref: pick('pnref', 'payment_reference_number', 'transactionid'),
+    result,
+    resp_message: pick('respmsg', 'message', 'result_message'),
+    amount: pick('amount', 'amt'),
+    auth_code: pick('authcode', 'authorization_code', 'approval_code'),
+    last_four: pick('lastfour', 'last4', 'card_number_last_four_digits'),
+    card_type: pick('cardtype', 'card_type'),
+    customer_name: pick('customername', 'name_on_card', 'customer_name'),
+    approved: result === '0',
+    received_at: new Date().toISOString()
+  };
+}
+
+async function sendPaymentEmail(payment, raw, airtableResult) {
+  if (!CFG.resendKey) return [{ ok: false, error: 'RESEND_API_KEY not set' }];
+
+  const matched = Boolean(payment.invoice_number);
+  const subject = !matched
+    ? '[UNMATCHED] SFO2 payment — no reference in callback'
+    : (payment.approved
+      ? 'SFO2 PAID — ' + payment.invoice_number + ' — $' + (payment.amount || '?')
+      : '[CHECK] SFO2 payment not approved — ' + payment.invoice_number + ' — result ' + (payment.result || '?'));
+
+  const row = (k, v) =>
+    '<tr><td style="padding:9px 14px;border-bottom:1px solid #eee;color:#666;font-size:13px;white-space:nowrap">' +
+    esc(k) + '</td><td style="padding:9px 14px;border-bottom:1px solid #eee;color:#111;font-size:15px;font-weight:600">' +
+    esc(v) + '</td></tr>';
+
+  const html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:640px;margin:0 auto;padding:22px">' +
+    '<div style="background:' + (payment.approved ? '#7EE8A2' : '#F7A98F') + ';border-radius:12px 12px 0 0;padding:16px 20px">' +
+    '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">Salsa Fever On2 · Payment</div>' +
+    '<div style="font-size:21px;font-weight:800;color:#111;margin-top:3px">' +
+    (payment.approved ? 'Payment received' : 'Needs attention') + '</div></div>' +
+    '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:20px">' +
+    '<table style="width:100%;border-collapse:collapse;border:1px solid #eee;border-radius:8px;overflow:hidden">' +
+    row('Reference', payment.invoice_number || '— none sent —') +
+    row('Transaction', payment.pnref || '—') +
+    row('Amount', payment.amount ? ('$' + payment.amount) : '—') +
+    row('Result', (payment.result || '—') + (payment.resp_message ? (' · ' + payment.resp_message) : '')) +
+    row('Card', ((payment.card_type || '') + (payment.last_four ? (' ••••' + payment.last_four) : '')) || '—') +
+    row('Source (EchoID)', payment.echo_id || '—') +
+    row('Airtable', airtableResult.ok ? 'row marked ' + (payment.approved ? 'paid' : 'payment_issue') : ('NOT updated — ' + airtableResult.error)) +
+    '</table>' +
+    '<div style="margin-top:18px;background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px">' +
+    '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#888;margin-bottom:8px">Raw callback — this is how we learn the real shape</div>' +
+    '<pre style="margin:0;font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.6;color:#222;white-space:pre-wrap">' +
+    esc(JSON.stringify(raw, null, 2).slice(0, 2000)) + '</pre></div>' +
+    '<p style="margin:18px 0 0;font-size:12px;color:#B3312A;line-height:1.6">' +
+    'The student has paid but has no pass in WellnessLiving yet — create it, or confirm they registered themselves.' +
+    '</p></div></div>';
+
+  const text = 'SFO2 PAYMENT\n\nReference: ' + (payment.invoice_number || '—') +
+    '\nTransaction: ' + (payment.pnref || '—') +
+    '\nAmount: $' + (payment.amount || '?') +
+    '\nResult: ' + (payment.result || '—') + ' ' + (payment.resp_message || '') +
+    '\nAirtable: ' + (airtableResult.ok ? 'updated' : 'NOT updated — ' + airtableResult.error) +
+    '\n\nThe student has paid but has no pass in WellnessLiving yet.';
+
+  const sendOne = async (to) => {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + CFG.resendKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: CFG.mailFrom, to: [to], subject, html, text })
+      });
+      return { to, ok: res.ok };
+    } catch (err) {
+      return { to, ok: false, error: String(err && err.message) };
+    }
+  };
+  return Promise.all(CFG.leadTo.map(sendOne));
+}
+
 /* -------------------------------------------------------------------- CORS */
 
 function corsHeaders(origin) {
@@ -371,7 +584,9 @@ const server = http.createServer(async (req, res) => {
        variable set on the wrong service or a deploy that never picked it up. */
     const expected = ['RESEND_API_KEY', 'MAIL_FROM', 'LEAD_TO',
       'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
-      'ALLOWED_ORIGINS', 'OFFER_PRICE'];
+      'ALLOWED_ORIGINS', 'OFFER_PRICE',
+      'PARAGON_HP_USER', 'PARAGON_HP_PASS', 'PARAGON_MERCHANT_KEY',
+      'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
@@ -382,7 +597,8 @@ const server = http.createServer(async (req, res) => {
         email: Boolean(CFG.resendKey),
         mail_from: CFG.mailFrom || null,
         recipients: CFG.leadTo.length,
-        airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable)
+        airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable),
+        paragon: paragonConfigured()
       },
       env_present: present,
       env_var_count: Object.keys(process.env).length,
@@ -456,17 +672,25 @@ const server = http.createServer(async (req, res) => {
 
     const lead = normalise(parsed);
 
-    /* Respond FIRST, then do the side effects.
-       The student is mid-signup and waiting on a redirect to checkout — they
-       must never wait on SMTP. An earlier version awaited both and hung for
-       minutes when the mail port stalled, leaving the form spinning.
-       payment_url stays null while checkout runs through WellnessLiving. */
+    /* The token mint is the ONLY thing the response waits on, because the
+       redirect URL depends on it (~700ms against stage). Email and Airtable
+       run after the response — the student must never wait on those. An
+       earlier version awaited email too and hung for minutes when the mail
+       port stalled, leaving the form spinning.
+       If minting fails, payment_url is null and the landing page falls back
+       to WellnessLiving rather than showing an error. */
+    const { token, error: tokenError } = await mintParagonToken(lead);
+    const paymentUrl = token ? buildPaymentUrl(token, lead) : null;
+    if (tokenError && paragonConfigured()) {
+      console.error('PARAGON TOKEN FAILED', lead.invoice_number, tokenError);
+    }
+
     json(200, {
       ok: true,
       received: lead.valid,
       errors: lead.errors,
       invoice_number: lead.invoice_number,
-      payment_url: null
+      payment_url: paymentUrl
     });
 
     Promise.allSettled([
@@ -482,6 +706,44 @@ const server = http.createServer(async (req, res) => {
         'email=' + emails.filter(e => e.ok).length + '/' + emails.length,
         'airtable=' + (airtable.ok ? 'ok' : 'fail'));
     });
+    return;
+  }
+
+  /* Paragon's "Transaction Create" callback. Set this URL in PUREsight →
+     Hosted Page → Fields → Callback URL.
+     NOT AUTHENTICATED YET — anyone who learns this URL can post a forged
+     payment. PUREsight → Administration → Keys holds HMAC keys; wire
+     signature verification before real money moves. */
+  if (req.method === 'POST' && url.pathname === '/paragon-callback') {
+    let body = {};
+    try {
+      const raw = await readBody(req, 64 * 1024);
+      const ct = String(req.headers['content-type'] || '');
+      if (ct.includes('application/json')) {
+        body = JSON.parse(raw || '{}');
+      } else {
+        body = Object.fromEntries(new URLSearchParams(raw || ''));
+      }
+    } catch (err) {
+      body = {};
+    }
+    const query = Object.fromEntries(url.searchParams);
+    const payment = parseCallback(body, query);
+
+    /* Always acknowledge. A non-2xx here could make Paragon retry or, worse,
+       treat the payment as unsettled — the money has already moved. */
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain' }, cors));
+    res.end('OK');
+
+    const airtableResult = payment.invoice_number
+      ? await markLeadPaid(payment.invoice_number, payment)
+      : { ok: false, error: 'no reference in callback' };
+
+    console.log('callback', payment.invoice_number || '(none)',
+      'approved=' + payment.approved, 'airtable=' + (airtableResult.ok ? 'ok' : airtableResult.error));
+
+    sendPaymentEmail(payment, { query, body }, airtableResult)
+      .catch(err => console.error('PAYMENT EMAIL FAILED', String(err && err.message)));
     return;
   }
 
