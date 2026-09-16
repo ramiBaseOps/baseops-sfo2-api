@@ -334,6 +334,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/healthz')) {
+    /* Reports which env var NAMES are present — never their values. Exists
+       because "configured: false" alone can't distinguish a typo from a
+       variable set on the wrong service or a deploy that never picked it up. */
+    const expected = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM',
+      'LEAD_TO', 'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
+      'ALLOWED_ORIGINS', 'OFFER_PRICE'];
+    const present = {};
+    expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
+
     return json(200, {
       service: 'baseops-sfo2-api',
       ok: true,
@@ -342,6 +351,8 @@ const server = http.createServer(async (req, res) => {
         recipients: CFG.leadTo.length,
         airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable)
       },
+      env_present: present,
+      env_var_count: Object.keys(process.env).length,
       time: new Date().toISOString()
     });
   }
