@@ -82,6 +82,21 @@ CFG.classSchedule = (process.env.CLASS_SCHEDULE || '1:19:7pm,6:12:12pm')
 const smsConfigured = () =>
   Boolean(CFG.twilioSid && CFG.twilioToken && CFG.twilioFrom);
 
+/* --- Student welcome email content ---
+   All of this is configuration rather than code, because the registration
+   steps are Mario's to define and will change before they are right.
+   WL_STEPS is pipe-separated; each item becomes a numbered step. */
+CFG.studioPageUrl = process.env.STUDIO_PAGE_URL || 'https://salsafeveron2.com';
+/* Replies from students should reach the studio, not our sending address. */
+CFG.studioReplyTo = process.env.STUDIO_REPLY_TO || 'sfon2services@gmail.com';
+CFG.wlSignupUrl = process.env.WL_SIGNUP_URL || '';
+CFG.wlSteps = (process.env.WL_STEPS || [
+  'Open the link above and choose Sign up',
+  'Use the same name and email you gave us when you paid, so we can match your pass to your profile',
+  'Once your profile exists we will add your 5-class pass to it',
+  'Book your first class from the schedule, or just turn up and we will sort it out'
+].join('|')).split('|').map(s => s.trim()).filter(Boolean);
+
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -564,7 +579,125 @@ function parseCallback(body, query) {
   };
 }
 
-async function sendPaymentEmail(payment, raw, airtableResult, studentSms) {
+/* The next three class dates, for the welcome email. */
+function nextClasses(count) {
+  if (!CFG.classSchedule.length) return [];
+  const out = [];
+  const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  for (let d = 0; d < 28 && out.length < count; d++) {
+    const day = new Date(nowET.getFullYear(), nowET.getMonth(), nowET.getDate() + d);
+    for (const s of CFG.classSchedule) {
+      if (day.getDay() !== s.dow) continue;
+      const when = new Date(day.getFullYear(), day.getMonth(), day.getDate(), s.hour);
+      if (when <= nowET) continue;
+      out.push(DAYS[when.getDay()] + ' ' + MONTHS[when.getMonth()] + ' ' + when.getDate() + ', ' + s.label);
+      if (out.length >= count) break;
+    }
+  }
+  return out;
+}
+
+/* Sent to the student after a successful payment. Deliberately does NOT claim
+   the pass is already on their WellnessLiving profile — on the Paragon path it
+   is not, and telling them otherwise would send them to a class they cannot
+   book. */
+async function sendStudentWelcome(fields, payment) {
+  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
+  const to = fields.Email;
+  if (!to) return { ok: false, error: 'no email on the matched row' };
+
+  const first = fields['First Name'] || 'there';
+  const upcoming = nextClasses(3);
+
+  const stepsHtml = CFG.wlSteps
+    .map((s, i) => '<li style="margin:0 0 9px;padding-left:4px">' + esc(s) + '</li>')
+    .join('');
+
+  const linkLine = CFG.wlSignupUrl
+    ? '<p style="margin:0 0 14px"><a href="' + esc(CFG.wlSignupUrl) +
+      '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:999px">Set up your profile</a></p>'
+    : '<p style="margin:0 0 14px;color:#B3312A;font-size:14px">We will send you the sign-up link separately — or just call the studio and we will do it with you.</p>';
+
+  const html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;padding:22px;color:#1a1a1a">' +
+    '<div style="background:linear-gradient(100deg,#FBAB7E,#F7CE68);border-radius:12px 12px 0 0;padding:20px">' +
+    '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">Salsa Fever On2</div>' +
+    '<div style="font-size:23px;font-weight:800;color:#111;margin-top:4px">You\'re in, ' + esc(first) + '</div></div>' +
+    '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:22px">' +
+
+    '<p style="margin:0 0 18px;font-size:15px;line-height:1.65">Your payment went through and your <b>5 Pre-Beginner classes</b> are paid for. Here is everything you need.</p>' +
+
+    '<h3 style="font-size:15px;margin:0 0 8px">When to come</h3>' +
+    (upcoming.length
+      ? '<p style="margin:0 0 6px;font-size:15px;line-height:1.7">Your next chances to start:<br><b>' +
+        upcoming.map(esc).join('</b><br><b>') + '</b></p>' +
+        '<p style="margin:0 0 18px;font-size:14px;color:#666">No cycle to wait for — come to whichever suits you.</p>'
+      : '<p style="margin:0 0 18px;font-size:15px">Call the studio and we will tell you the next class.</p>') +
+
+    '<h3 style="font-size:15px;margin:0 0 8px">Where</h3>' +
+    '<p style="margin:0 0 18px;font-size:15px;line-height:1.7"><b>' + esc(CFG.studioAddress) + '</b><br>' +
+    'Wear socks or suede-soled shoes. No partner needed — most people arrive on their own.</p>' +
+
+    '<h3 style="font-size:15px;margin:0 0 8px">One thing to do before your first class</h3>' +
+    '<p style="margin:0 0 12px;font-size:15px;line-height:1.65">Set up your profile so we can attach your pass and book you in.</p>' +
+    linkLine +
+    '<ol style="margin:0 0 20px;padding-left:20px;font-size:14.5px;line-height:1.6;color:#333">' + stepsHtml + '</ol>' +
+
+    '<div style="background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px;font-size:14px;line-height:1.6">' +
+    'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(payment.invoice_number || '') + '</b>' +
+    (payment.amount ? ' &nbsp;·&nbsp; Paid $' + esc(payment.amount) : '') +
+    '<br>Quote it if you contact us about this purchase.</div>' +
+
+    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Any questions at all, call or text <a href="tel:' +
+    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
+    'See you on the floor.</p>' +
+    '</div></div>';
+
+  const text = [
+    "You're in, " + first,
+    '',
+    'Your payment went through and your 5 Pre-Beginner classes are paid for.',
+    '',
+    'WHEN TO COME',
+    upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
+    'No cycle to wait for - come to whichever suits you.',
+    '',
+    'WHERE',
+    CFG.studioAddress,
+    'Wear socks or suede-soled shoes. No partner needed.',
+    '',
+    'BEFORE YOUR FIRST CLASS',
+    'Set up your profile so we can attach your pass:',
+    CFG.wlSignupUrl || '(we will send you the link separately)',
+    ...CFG.wlSteps.map((s, i) => (i + 1) + '. ' + s),
+    '',
+    'Reference: ' + (payment.invoice_number || ''),
+    payment.amount ? ('Paid: $' + payment.amount) : '',
+    '',
+    'Questions: ' + CFG.studioPhone,
+    'See you on the floor.'
+  ].filter(l => l !== '').join('\n');
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + CFG.resendKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: CFG.mailFrom,
+        to: [to],
+        reply_to: CFG.studioReplyTo || undefined,
+        subject: "You're in — your Salsa Fever On2 classes are booked",
+        html, text
+      })
+    });
+    const body = await res.json().catch(() => ({}));
+    return { ok: res.ok, to, id: body.id || null, error: res.ok ? null : JSON.stringify(body).slice(0, 200) };
+  } catch (err) {
+    return { ok: false, to, error: String(err && err.message) };
+  }
+}
+
+async function sendPaymentEmail(payment, raw, airtableResult, studentSms, studentEmail) {
+  studentEmail = studentEmail || { ok: false, error: 'not attempted' };
   studentSms = studentSms || { ok: false, error: 'not attempted' };
   if (!CFG.resendKey) return [{ ok: false, error: 'RESEND_API_KEY not set' }];
 
@@ -597,6 +730,9 @@ async function sendPaymentEmail(payment, raw, airtableResult, studentSms) {
     row('Confirmation SMS', studentSms.ok
       ? ('accepted by Twilio (' + (studentSms.status || 'queued') + ') — delivery not confirmed, check Twilio logs')
       : ('not sent — ' + studentSms.error)) +
+    row('Welcome email to student', studentEmail.ok
+      ? ('sent to ' + studentEmail.to)
+      : ('not sent — ' + studentEmail.error)) +
     '</table>' +
     '<div style="margin-top:18px;background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px">' +
     '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#888;margin-bottom:8px">Raw callback — this is how we learn the real shape</div>' +
@@ -708,7 +844,8 @@ const server = http.createServer(async (req, res) => {
       'PARAGON_HP_USER', 'PARAGON_HP_PASS', 'PARAGON_MERCHANT_KEY',
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
-      'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS'];
+      'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
+      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
@@ -908,12 +1045,23 @@ const server = http.createServer(async (req, res) => {
       studentSms = { ok: false, error: 'no phone on the matched row' };
     }
 
+    /* Welcome email with the instructions. Only on an approved payment against
+       a matched row — a student who has not paid must not be told they are in. */
+    let studentEmail = { ok: false, error: 'not attempted' };
+    if (payment.approved && airtableResult.ok) {
+      studentEmail = await sendStudentWelcome(studentFields, payment);
+      if (!studentEmail.ok) {
+        console.error('STUDENT WELCOME EMAIL FAILED', payment.invoice_number, studentEmail.error);
+      }
+    }
+
     console.log('callback', payment.invoice_number || '(none)',
       'approved=' + payment.approved,
       'airtable=' + (airtableResult.ok ? 'ok' : airtableResult.error),
-      'sms=' + (studentSms.ok ? 'sent' : studentSms.error));
+      'sms=' + (studentSms.ok ? ('queued ' + (studentSms.status || '')) : studentSms.error),
+      'welcome=' + (studentEmail.ok ? 'sent' : studentEmail.error));
 
-    sendPaymentEmail(payment, { query, body }, airtableResult, studentSms)
+    sendPaymentEmail(payment, { query, body }, airtableResult, studentSms, studentEmail)
       .catch(err => console.error('PAYMENT EMAIL FAILED', String(err && err.message)));
     return;
   }
