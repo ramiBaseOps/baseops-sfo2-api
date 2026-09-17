@@ -122,9 +122,15 @@ async function sendSms(to, body) {
       signal: ac.signal
     });
     const json = await res.json().catch(() => ({}));
+    /* A 2xx here means Twilio ACCEPTED the message, not that a carrier
+       delivered it. Delivery failures (A2P 10DLC registration, carrier
+       filtering, unreachable handset) surface asynchronously and are only
+       visible in Twilio's logs or via a status callback. Report the queue
+       status honestly rather than claiming it was sent. */
     return {
       ok: res.ok,
       sid: json.sid || null,
+      status: json.status || null,
       error: res.ok ? null : (json.message || ('HTTP ' + res.status))
     };
   } catch (err) {
@@ -588,7 +594,9 @@ async function sendPaymentEmail(payment, raw, airtableResult, studentSms) {
     row('Card', ((payment.card_type || '') + (payment.last_four ? (' ••••' + payment.last_four) : '')) || '—') +
     row('Source (EchoID)', payment.echo_id || '—') +
     row('Airtable', airtableResult.ok ? 'row marked ' + (payment.approved ? 'paid' : 'payment_issue') : ('NOT updated — ' + airtableResult.error)) +
-    row('Confirmation SMS', studentSms.ok ? 'sent to the student' : ('not sent — ' + studentSms.error)) +
+    row('Confirmation SMS', studentSms.ok
+      ? ('accepted by Twilio (' + (studentSms.status || 'queued') + ') — delivery not confirmed, check Twilio logs')
+      : ('not sent — ' + studentSms.error)) +
     '</table>' +
     '<div style="margin-top:18px;background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px">' +
     '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#888;margin-bottom:8px">Raw callback — this is how we learn the real shape</div>' +
