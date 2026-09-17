@@ -59,6 +59,109 @@ const CFG = {
 const paragonConfigured = () =>
   Boolean(CFG.paragonUser && CFG.paragonPass && CFG.paragonMerchantKey);
 
+/* --- Twilio SMS ---
+   Transactional only for now: a confirmation of a purchase the student just
+   made. Nothing promotional goes out on this path, because the consent
+   checkbox on the form is optional and unticked by default — marketing to
+   someone who did not tick it is exactly what that checkbox exists to prevent. */
+CFG.twilioSid = process.env.TWILIO_ACCOUNT_SID || '';
+CFG.twilioToken = process.env.TWILIO_AUTH_TOKEN || '';
+CFG.twilioFrom = process.env.TWILIO_FROM || '';
+CFG.studioPhone = process.env.STUDIO_PHONE || '201-792-1616';
+CFG.studioAddress = process.env.STUDIO_ADDRESS || '83 Franklin St, Jersey City';
+
+/* "dow:hour:label" entries, comma separated. Sunday = 0.
+   UNCONFIRMED by Mario as of 2026-09-17 — kept in config precisely so it can
+   be corrected without a deploy. */
+CFG.classSchedule = (process.env.CLASS_SCHEDULE || '1:19:7pm,6:12:12pm')
+  .split(',')
+  .map(s => s.trim().split(':'))
+  .filter(p => p.length === 3)
+  .map(p => ({ dow: Number(p[0]), hour: Number(p[1]), label: p[2] }));
+
+const smsConfigured = () =>
+  Boolean(CFG.twilioSid && CFG.twilioToken && CFG.twilioFrom);
+
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/* Next scheduled class in studio time, skipping one that has already started. */
+function nextClassText() {
+  if (!CFG.classSchedule.length) return null;
+  const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  for (let d = 0; d < 21; d++) {
+    const day = new Date(nowET.getFullYear(), nowET.getMonth(), nowET.getDate() + d);
+    for (const s of CFG.classSchedule) {
+      if (day.getDay() !== s.dow) continue;
+      const when = new Date(day.getFullYear(), day.getMonth(), day.getDate(), s.hour);
+      if (when <= nowET) continue;
+      return DAYS[when.getDay()] + ' ' + MONTHS[when.getMonth()] + ' ' + when.getDate() + ', ' + s.label;
+    }
+  }
+  return null;
+}
+
+async function sendSms(to, body) {
+  if (!smsConfigured()) return { ok: false, error: 'twilio not configured' };
+  if (!to) return { ok: false, error: 'no phone number' };
+
+  const url = 'https://api.twilio.com/2010-04-01/Accounts/' +
+    encodeURIComponent(CFG.twilioSid) + '/Messages.json';
+  const auth = Buffer.from(CFG.twilioSid + ':' + CFG.twilioToken).toString('base64');
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + auth,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({ To: to, From: CFG.twilioFrom, Body: body }).toString(),
+      signal: ac.signal
+    });
+    const json = await res.json().catch(() => ({}));
+    return {
+      ok: res.ok,
+      sid: json.sid || null,
+      error: res.ok ? null : (json.message || ('HTTP ' + res.status))
+    };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* Deliberately factual and short. No marketing language, no links to follow,
+   nothing that would make this read as promotional to a regulator.
+
+   ASCII ONLY — and this matters commercially. Any character outside GSM-7 (an
+   em dash, curly quote, accent) switches the whole message to UCS-2, which cuts
+   the per-segment limit from 160 to 70. One stray dash turns a single-segment
+   text into three and triples the cost of every send. */
+function toGsm7(s) {
+  return String(s)
+    .replace(/[–—]/g, '-')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, '...')
+    .replace(/[^\x20-\x7E\n]/g, '');
+}
+
+function paymentSmsBody(firstName, payment) {
+  const next = nextClassText();
+  const body = [
+    'Salsa Fever On2: payment received' + (payment.amount ? (', $' + payment.amount) : '') + '.',
+    firstName ? ('Thanks ' + firstName + '!') : '',
+    next ? ('Next class ' + next + ', ' + CFG.studioAddress + '.') : (CFG.studioAddress + '.'),
+    'Questions ' + CFG.studioPhone + '.',
+    'Ref ' + (payment.invoice_number || '')
+  ].filter(Boolean).join(' ');
+  return toGsm7(body);
+}
+
 /* ---------------------------------------------------------------- helpers */
 
 const clean = v => (v === undefined || v === null) ? '' : String(v).trim();
@@ -405,7 +508,14 @@ async function markLeadPaid(invoiceNumber, payment) {
       body: JSON.stringify({ records: [{ id: rec.id, fields }], typecast: true })
     });
     const upBody = await upRes.json().catch(() => ({}));
-    return { ok: upRes.ok, id: rec.id, error: upRes.ok ? null : JSON.stringify(upBody).slice(0, 200) };
+    /* Return the student's details too — the callback needs them to send the
+       confirmation SMS, and this lookup already has them. */
+    return {
+      ok: upRes.ok,
+      id: rec.id,
+      fields: rec.fields || {},
+      error: upRes.ok ? null : JSON.stringify(upBody).slice(0, 200)
+    };
   } catch (err) {
     return { ok: false, error: String(err && err.message) };
   }
@@ -448,7 +558,8 @@ function parseCallback(body, query) {
   };
 }
 
-async function sendPaymentEmail(payment, raw, airtableResult) {
+async function sendPaymentEmail(payment, raw, airtableResult, studentSms) {
+  studentSms = studentSms || { ok: false, error: 'not attempted' };
   if (!CFG.resendKey) return [{ ok: false, error: 'RESEND_API_KEY not set' }];
 
   const matched = Boolean(payment.invoice_number);
@@ -477,6 +588,7 @@ async function sendPaymentEmail(payment, raw, airtableResult) {
     row('Card', ((payment.card_type || '') + (payment.last_four ? (' ••••' + payment.last_four) : '')) || '—') +
     row('Source (EchoID)', payment.echo_id || '—') +
     row('Airtable', airtableResult.ok ? 'row marked ' + (payment.approved ? 'paid' : 'payment_issue') : ('NOT updated — ' + airtableResult.error)) +
+    row('Confirmation SMS', studentSms.ok ? 'sent to the student' : ('not sent — ' + studentSms.error)) +
     '</table>' +
     '<div style="margin-top:18px;background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px">' +
     '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#888;margin-bottom:8px">Raw callback — this is how we learn the real shape</div>' +
@@ -586,7 +698,9 @@ const server = http.createServer(async (req, res) => {
       'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
       'ALLOWED_ORIGINS', 'OFFER_PRICE',
       'PARAGON_HP_USER', 'PARAGON_HP_PASS', 'PARAGON_MERCHANT_KEY',
-      'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE'];
+      'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
+      'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
+      'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
@@ -598,8 +712,10 @@ const server = http.createServer(async (req, res) => {
         mail_from: CFG.mailFrom || null,
         recipients: CFG.leadTo.length,
         airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable),
-        paragon: paragonConfigured()
+        paragon: paragonConfigured(),
+        sms: smsConfigured()
       },
+      next_class: nextClassText(),
       env_present: present,
       env_var_count: Object.keys(process.env).length,
       time: new Date().toISOString()
@@ -646,6 +762,27 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    let twilio = { ok: false, error: 'TWILIO not configured' };
+    if (smsConfigured()) {
+      const tStarted = Date.now();
+      try {
+        const auth = Buffer.from(CFG.twilioSid + ':' + CFG.twilioToken).toString('base64');
+        const tr = await fetch('https://api.twilio.com/2010-04-01/Accounts/' +
+          encodeURIComponent(CFG.twilioSid) + '.json', { headers: { 'Authorization': 'Basic ' + auth } });
+        const tj = await tr.json().catch(() => ({}));
+        twilio = {
+          ok: tr.ok,
+          status: tr.status,
+          ms: Date.now() - tStarted,
+          account_status: tj.status || null,
+          from: CFG.twilioFrom || null,
+          error: tr.ok ? null : (tj.message || ('HTTP ' + tr.status))
+        };
+      } catch (err) {
+        twilio = { ok: false, error: String(err && err.message) };
+      }
+    }
+
     let airtable;
     const aStarted = Date.now();
     try {
@@ -658,7 +795,13 @@ const server = http.createServer(async (req, res) => {
       airtable = { ok: false, ms: Date.now() - aStarted, error: String(err && err.message) };
     }
 
-    return json(200, { resend, airtable, mail_from: CFG.mailFrom, recipients: CFG.leadTo, smtp });
+    return json(200, {
+      resend, airtable, twilio,
+      mail_from: CFG.mailFrom,
+      recipients: CFG.leadTo,
+      next_class: nextClassText(),
+      smtp
+    });
   }
 
   if (req.method === 'POST' && url.pathname === '/lead') {
@@ -739,10 +882,30 @@ const server = http.createServer(async (req, res) => {
       ? await markLeadPaid(payment.invoice_number, payment)
       : { ok: false, error: 'no reference in callback' };
 
-    console.log('callback', payment.invoice_number || '(none)',
-      'approved=' + payment.approved, 'airtable=' + (airtableResult.ok ? 'ok' : airtableResult.error));
+    /* Transactional confirmation to the student. Only on an approved payment,
+       only when we positively matched their row, and regardless of the SMS
+       marketing opt-in — this is a receipt for a purchase they just made, not
+       promotion. Anything promotional must be gated on that opt-in instead. */
+    let studentSms = { ok: false, error: 'not attempted' };
+    const studentFields = airtableResult.fields || {};
+    if (payment.approved && airtableResult.ok && studentFields.Phone) {
+      studentSms = await sendSms(
+        studentFields.Phone,
+        paymentSmsBody(studentFields['First Name'] || '', payment)
+      );
+      if (!studentSms.ok) {
+        console.error('STUDENT SMS FAILED', payment.invoice_number, studentSms.error);
+      }
+    } else if (payment.approved && !studentFields.Phone) {
+      studentSms = { ok: false, error: 'no phone on the matched row' };
+    }
 
-    sendPaymentEmail(payment, { query, body }, airtableResult)
+    console.log('callback', payment.invoice_number || '(none)',
+      'approved=' + payment.approved,
+      'airtable=' + (airtableResult.ok ? 'ok' : airtableResult.error),
+      'sms=' + (studentSms.ok ? 'sent' : studentSms.error));
+
+    sendPaymentEmail(payment, { query, body }, airtableResult, studentSms)
       .catch(err => console.error('PAYMENT EMAIL FAILED', String(err && err.message)));
     return;
   }
