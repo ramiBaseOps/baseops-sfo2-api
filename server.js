@@ -613,10 +613,7 @@ function nextClasses(count) {
    they close the tab, this is where the link still lives.
 
    It must never imply the pass is already theirs. */
-async function sendStudentRegistrationEmail(lead) {
-  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
-  if (!lead.email || !lead.valid) return { ok: false, error: 'invalid lead — not emailed' };
-
+function buildRegistrationEmail(lead) {
   const first = lead.first_name || 'there';
   const upcoming = nextClasses(3);
   const payLink = CFG.checkoutUrl +
@@ -677,6 +674,15 @@ async function sendStudentRegistrationEmail(lead) {
     'See you on the floor.'
   ].join('\n');
 
+  return { subject: 'Thanks for registering — one step left', html, text };
+}
+
+async function sendStudentRegistrationEmail(lead) {
+  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
+  if (!lead.email || !lead.valid) return { ok: false, error: 'invalid lead — not emailed' };
+
+  const { subject, html, text } = buildRegistrationEmail(lead);
+
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -685,8 +691,7 @@ async function sendStudentRegistrationEmail(lead) {
         from: CFG.mailFrom,
         to: [lead.email],
         reply_to: CFG.studioReplyTo || undefined,
-        subject: 'Thanks for registering — one step left',
-        html, text
+        subject, html, text
       })
     });
     const body = await res.json().catch(() => ({}));
@@ -964,6 +969,32 @@ const server = http.createServer(async (req, res) => {
       env_var_count: Object.keys(process.env).length,
       time: new Date().toISOString()
     });
+  }
+
+  /* Renders an email template with sample data so it can be reviewed without
+     sending anything. Sends no mail, touches no records, writes nothing.
+     ?format=text shows the plain-text alternative instead. */
+  if (req.method === 'GET' && url.pathname === '/preview/registration-email') {
+    const sample = {
+      name: url.searchParams.get('name') || 'Maria Rodriguez',
+      first_name: (url.searchParams.get('name') || 'Maria Rodriguez').split(/\s+/)[0],
+      email: 'student@example.com',
+      invoice_number: 'SFO2-K7M2QX',
+      valid: true
+    };
+    const { subject, html, text } = buildRegistrationEmail(sample);
+
+    if (url.searchParams.get('format') === 'text') {
+      res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, cors));
+      return res.end('SUBJECT: ' + subject + '\n\n' + text);
+    }
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
+    return res.end(
+      '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f4;padding:18px">' +
+      '<div style="max-width:600px;margin:0 auto 14px;font-size:13px;color:#555">' +
+      '<b>Subject:</b> ' + esc(subject) + '<br><b>From:</b> ' + esc(CFG.mailFrom) +
+      ' &nbsp;<b>Reply-to:</b> ' + esc(CFG.studioReplyTo || '—') + '</div>' +
+      html + '</div>');
   }
 
   if (req.method === 'GET' && url.pathname === '/probe') {
