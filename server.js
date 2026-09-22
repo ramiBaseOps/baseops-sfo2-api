@@ -87,6 +87,8 @@ const smsConfigured = () =>
    steps are Mario's to define and will change before they are right.
    WL_STEPS is pipe-separated; each item becomes a numbered step. */
 CFG.studioPageUrl = process.env.STUDIO_PAGE_URL || 'https://salsafeveron2.com';
+CFG.logoUrl = process.env.STUDIO_LOGO_URL ||
+  'https://salsafeveron2.com/wp-content/uploads/2018/12/sf-logo.png';
 /* Where the student goes to complete the purchase. Their reference is appended
    as ?ref=, which is what makes this link resumable — they can close the tab
    and come back days later without losing their place. */
@@ -621,8 +623,18 @@ function buildRegistrationEmail(lead) {
     'ref=' + encodeURIComponent(lead.invoice_number);
 
   const html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;padding:22px;color:#1a1a1a">' +
-    '<div style="background:linear-gradient(100deg,#FBAB7E,#F7CE68);border-radius:12px 12px 0 0;padding:20px">' +
-    '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">Salsa Fever On2</div>' +
+
+    /* Logo sits on black, matching the site header — the mark is light, so it
+       would disappear on the gold band below. Many clients block remote images
+       by default (Zoho does), so the alt text has to stand on its own. */
+    '<div style="background:#0d0d0d;border-radius:12px 12px 0 0;padding:16px 20px;text-align:center">' +
+    '<img src="' + esc(CFG.logoUrl) + '" alt="Salsa Fever On2 Dance Academy" width="160" ' +
+    'style="width:160px;max-width:70%;height:auto;display:inline-block;border:0;color:#fff;font-size:14px;font-weight:700">' +
+    '</div>' +
+
+    /* background-color first as the fallback: Outlook ignores the gradient. */
+    '<div style="background:#F7CE68;background:linear-gradient(100deg,#FBAB7E,#F7CE68);padding:20px">' +
+    '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">New Student Special</div>' +
     '<div style="font-size:23px;font-weight:800;color:#111;margin-top:4px">Thanks for registering, ' + esc(first) + '</div></div>' +
     '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:22px">' +
 
@@ -630,8 +642,7 @@ function buildRegistrationEmail(lead) {
 
     '<p style="margin:0 0 10px"><a href="' + esc(payLink) +
     '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 24px;border-radius:999px;font-size:15px">Complete your purchase — $' + CFG.price + '</a></p>' +
-    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">No rush — this link keeps working. Save this email and come back to it whenever works for you.<br>' +
-    'Prefer to pay in person? Just come to a class and settle up at the studio.</p>' +
+    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">Prefer to pay in person? Just show up. Bring this email and settle up at the studio.</p>' +
 
     '<h3 style="font-size:15px;margin:0 0 8px">When classes run</h3>' +
     (upcoming.length
@@ -659,9 +670,8 @@ function buildRegistrationEmail(lead) {
     'complete your purchase and your 5 Pre-Beginner classes are yours:',
     payLink,
     '',
-    'No rush, this link keeps working. Save this email and come back to it',
-    'whenever works for you.',
-    'Prefer to pay in person? Just come to a class and settle up at the studio.',
+    'Prefer to pay in person? Just show up. Bring this email and settle up',
+    'at the studio.',
     '',
     'WHEN CLASSES RUN',
     upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
@@ -952,7 +962,8 @@ const server = http.createServer(async (req, res) => {
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
       'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
-      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS', 'STUDENT_CHECKOUT_URL'];
+      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS', 'STUDENT_CHECKOUT_URL',
+      'STUDIO_LOGO_URL'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
