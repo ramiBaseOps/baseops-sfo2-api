@@ -87,6 +87,11 @@ const smsConfigured = () =>
    steps are Mario's to define and will change before they are right.
    WL_STEPS is pipe-separated; each item becomes a numbered step. */
 CFG.studioPageUrl = process.env.STUDIO_PAGE_URL || 'https://salsafeveron2.com';
+/* Where the student goes to complete the purchase. Their reference is appended
+   as ?ref=, which is what makes this link resumable — they can close the tab
+   and come back days later without losing their place. */
+CFG.checkoutUrl = process.env.STUDENT_CHECKOUT_URL ||
+  'https://www.baseops.tech/salsaFeverOn2Promotion/checkout';
 /* Replies from students should reach the studio, not our sending address. */
 CFG.studioReplyTo = process.env.STUDIO_REPLY_TO || 'sfon2services@gmail.com';
 CFG.wlSignupUrl = process.env.WL_SIGNUP_URL || '';
@@ -289,7 +294,10 @@ function buildEmail(lead) {
     '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">Salsa Fever On2 · New student</div>' +
     '<div style="font-size:21px;font-weight:800;color:#111;margin-top:3px">' + esc(lead.name || 'Name missing') + '</div></div>' +
     '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:20px">' + warn +
-    '<p style="margin:0 0 16px;font-size:14px;color:#444">Enter this student into WellnessLiving, then reply <b>DONE</b> to this email.</p>' +
+    '<p style="margin:0 0 6px;font-size:14px;color:#444"><b>Action needed:</b> create this student in WellnessLiving.</p>' +
+    '<p style="margin:0 0 16px;font-size:13.5px;color:#777;line-height:1.6">They have been emailed their purchase link. ' +
+    '<b>Payment is not confirmed</b> — we do not get a signal from WellnessLiving, so check there or at the door, ' +
+    'then set this row to <b>paid</b> in Airtable by hand.</p>' +
     '<table style="width:100%;border-collapse:collapse;border:1px solid #eee;border-radius:8px;overflow:hidden">' +
     row('First name', lead.first_name || '—') +
     row('Last name', lead.last_name || '—') +
@@ -301,6 +309,7 @@ function buildEmail(lead) {
     row('SMS opt-in', lead.sms_consent ? 'YES — consented' : 'No') +
     row('Source', lead.source, true) +
     row('Reference', lead.invoice_number, true) +
+    row('Payment', 'NOT confirmed — verify in WellnessLiving or at the door') +
     row('Submitted', nowET + ' ET') +
     '</table>' +
     '<div style="margin-top:18px;background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px">' +
@@ -597,6 +606,96 @@ function nextClasses(count) {
   return out;
 }
 
+/* Sent to the student the moment they register — BEFORE payment.
+   Its job is to carry the purchase link somewhere permanent. On the
+   WellnessLiving path we never learn whether they paid, so this email is the
+   only thing standing between a half-finished signup and a lost student: if
+   they close the tab, this is where the link still lives.
+
+   It must never imply the pass is already theirs. */
+async function sendStudentRegistrationEmail(lead) {
+  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
+  if (!lead.email || !lead.valid) return { ok: false, error: 'invalid lead — not emailed' };
+
+  const first = lead.first_name || 'there';
+  const upcoming = nextClasses(3);
+  const payLink = CFG.checkoutUrl +
+    (CFG.checkoutUrl.indexOf('?') === -1 ? '?' : '&') +
+    'ref=' + encodeURIComponent(lead.invoice_number);
+
+  const html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;padding:22px;color:#1a1a1a">' +
+    '<div style="background:linear-gradient(100deg,#FBAB7E,#F7CE68);border-radius:12px 12px 0 0;padding:20px">' +
+    '<div style="font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#111;opacity:.75">Salsa Fever On2</div>' +
+    '<div style="font-size:23px;font-weight:800;color:#111;margin-top:4px">Thanks for registering, ' + esc(first) + '</div></div>' +
+    '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:22px">' +
+
+    '<p style="margin:0 0 16px;font-size:15px;line-height:1.65">We have your details. There is <b>one step left</b> — complete your purchase and your 5 Pre-Beginner classes are yours.</p>' +
+
+    '<p style="margin:0 0 10px"><a href="' + esc(payLink) +
+    '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 24px;border-radius:999px;font-size:15px">Complete your purchase — $' + CFG.price + '</a></p>' +
+    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">No rush — this link keeps working. Save this email and come back to it whenever suits you.</p>' +
+
+    '<h3 style="font-size:15px;margin:0 0 8px">When classes run</h3>' +
+    (upcoming.length
+      ? '<p style="margin:0 0 6px;font-size:15px;line-height:1.7"><b>' + upcoming.map(esc).join('</b><br><b>') + '</b></p>' +
+        '<p style="margin:0 0 18px;font-size:14px;color:#666">No cycle to wait for — come to whichever suits you.</p>'
+      : '<p style="margin:0 0 18px;font-size:15px">Call the studio and we will tell you the next class.</p>') +
+
+    '<h3 style="font-size:15px;margin:0 0 8px">Where</h3>' +
+    '<p style="margin:0 0 18px;font-size:15px;line-height:1.7"><b>' + esc(CFG.studioAddress) + '</b><br>' +
+    'Wear socks or suede-soled shoes. No partner needed — most people arrive on their own.</p>' +
+
+    '<div style="background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px;font-size:14px;line-height:1.6">' +
+    'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(lead.invoice_number) + '</b><br>' +
+    'Quote it if you call the studio and we will find you straight away.</div>' +
+
+    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Questions? Call or text <a href="tel:' +
+    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
+    'See you on the floor.</p>' +
+    '</div></div>';
+
+  const text = [
+    'Thanks for registering, ' + first,
+    '',
+    'We have your details. One step left - complete your purchase and your',
+    '5 Pre-Beginner classes are yours:',
+    payLink,
+    '',
+    'No rush, this link keeps working. Save this email and come back to it.',
+    '',
+    'WHEN CLASSES RUN',
+    upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
+    'No cycle to wait for - come to whichever suits you.',
+    '',
+    'WHERE',
+    CFG.studioAddress,
+    'Wear socks or suede-soled shoes. No partner needed.',
+    '',
+    'Your reference: ' + lead.invoice_number,
+    '',
+    'Questions: ' + CFG.studioPhone,
+    'See you on the floor.'
+  ].join('\n');
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + CFG.resendKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: CFG.mailFrom,
+        to: [lead.email],
+        reply_to: CFG.studioReplyTo || undefined,
+        subject: 'Thanks for registering — one step left',
+        html, text
+      })
+    });
+    const body = await res.json().catch(() => ({}));
+    return { ok: res.ok, to: lead.email, id: body.id || null, error: res.ok ? null : JSON.stringify(body).slice(0, 200) };
+  } catch (err) {
+    return { ok: false, to: lead.email, error: String(err && err.message) };
+  }
+}
+
 /* Sent to the student after a successful payment. Deliberately does NOT claim
    the pass is already on their WellnessLiving profile — on the Paragon path it
    is not, and telling them otherwise would send them to a class they cannot
@@ -845,7 +944,7 @@ const server = http.createServer(async (req, res) => {
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
       'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
-      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS'];
+      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS', 'STUDENT_CHECKOUT_URL'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
@@ -983,15 +1082,19 @@ const server = http.createServer(async (req, res) => {
 
     Promise.allSettled([
       sendLeadEmails(lead),
-      writeAirtable(lead)
-    ]).then(([mailRes, airRes]) => {
+      writeAirtable(lead),
+      sendStudentRegistrationEmail(lead)
+    ]).then(([mailRes, airRes, studentRes]) => {
       const emails = mailRes.status === 'fulfilled' ? mailRes.value : [{ ok: false, error: String(mailRes.reason && mailRes.reason.message) }];
       const airtable = airRes.status === 'fulfilled' ? airRes.value : { ok: false, error: String(airRes.reason && airRes.reason.message) };
+      const student = studentRes.status === 'fulfilled' ? studentRes.value : { ok: false, error: String(studentRes.reason && studentRes.reason.message) };
 
       if (!emails.some(e => e.ok)) console.error('LEAD EMAIL FAILED', lead.invoice_number, JSON.stringify(emails));
       if (!airtable.ok) console.error('LEAD AIRTABLE FAILED', lead.invoice_number, airtable.error);
+      if (!student.ok) console.error('STUDENT REG EMAIL FAILED', lead.invoice_number, student.error);
       console.log('lead', lead.invoice_number, 'valid=' + lead.valid,
-        'email=' + emails.filter(e => e.ok).length + '/' + emails.length,
+        'studio=' + emails.filter(e => e.ok).length + '/' + emails.length,
+        'student=' + (student.ok ? 'sent' : student.error),
         'airtable=' + (airtable.ok ? 'ok' : 'fail'));
     });
     return;
