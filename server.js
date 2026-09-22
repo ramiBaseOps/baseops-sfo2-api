@@ -626,11 +626,12 @@ function buildRegistrationEmail(lead) {
     '<div style="font-size:23px;font-weight:800;color:#111;margin-top:4px">Thanks for registering, ' + esc(first) + '</div></div>' +
     '<div style="border:1px solid #e6e6e6;border-top:none;border-radius:0 0 12px 12px;padding:22px">' +
 
-    '<p style="margin:0 0 16px;font-size:15px;line-height:1.65">We have your details. There is <b>one step left</b> — complete your purchase and your 5 Pre-Beginner classes are yours.</p>' +
+    '<p style="margin:0 0 16px;font-size:15px;line-height:1.65">We have your details. <b>If you haven\'t already</b>, there\'s one step left — complete your purchase and your 5 Pre-Beginner classes are yours.</p>' +
 
     '<p style="margin:0 0 10px"><a href="' + esc(payLink) +
     '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 24px;border-radius:999px;font-size:15px">Complete your purchase — $' + CFG.price + '</a></p>' +
-    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">No rush — this link keeps working. Save this email and come back to it whenever suits you.</p>' +
+    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">No rush — this link keeps working. Save this email and come back to it whenever works for you.<br>' +
+    'Prefer to pay in person? Just come to a class and settle up at the studio.</p>' +
 
     '<h3 style="font-size:15px;margin:0 0 8px">When classes run</h3>' +
     (upcoming.length
@@ -644,7 +645,7 @@ function buildRegistrationEmail(lead) {
 
     '<div style="background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px;font-size:14px;line-height:1.6">' +
     'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(lead.invoice_number) + '</b><br>' +
-    'Quote it if you call the studio and we will find you straight away.</div>' +
+    'Quote it if you call the studio and we\'ll find you right away.</div>' +
 
     '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Questions? Call or text <a href="tel:' +
     esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
@@ -654,11 +655,13 @@ function buildRegistrationEmail(lead) {
   const text = [
     'Thanks for registering, ' + first,
     '',
-    'We have your details. One step left - complete your purchase and your',
-    '5 Pre-Beginner classes are yours:',
+    "We have your details. If you haven't already, there's one step left -",
+    'complete your purchase and your 5 Pre-Beginner classes are yours:',
     payLink,
     '',
-    'No rush, this link keeps working. Save this email and come back to it.',
+    'No rush, this link keeps working. Save this email and come back to it',
+    'whenever works for you.',
+    'Prefer to pay in person? Just come to a class and settle up at the studio.',
     '',
     'WHEN CLASSES RUN',
     upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
