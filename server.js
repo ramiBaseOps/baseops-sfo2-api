@@ -59,6 +59,64 @@ const CFG = {
 const paragonConfigured = () =>
   Boolean(CFG.paragonUser && CFG.paragonPass && CFG.paragonMerchantKey);
 
+/* Basic auth on the inbound callback. Paragon confirmed (2026-09-23) that the
+   PURE platform can send a username and password with the POST, set alongside
+   the Callback URL in PUREsight. Until these are set the endpoint accepts
+   anything — set them before production. */
+CFG.callbackUser = process.env.CALLBACK_USER || '';
+CFG.callbackPass = process.env.CALLBACK_PASS || '';
+
+function callbackAuthorized(req) {
+  if (!CFG.callbackUser && !CFG.callbackPass) return { ok: true, unguarded: true };
+  const header = String(req.headers['authorization'] || '');
+  if (!header.startsWith('Basic ')) return { ok: false, reason: 'no basic auth header' };
+  let decoded = '';
+  try {
+    decoded = Buffer.from(header.slice(6).trim(), 'base64').toString('utf8');
+  } catch (e) {
+    return { ok: false, reason: 'undecodable credentials' };
+  }
+  const sep = decoded.indexOf(':');
+  const user = sep === -1 ? decoded : decoded.slice(0, sep);
+  const pass = sep === -1 ? '' : decoded.slice(sep + 1);
+
+  /* Compare both halves in constant time so a wrong username and a wrong
+     password are indistinguishable by timing. */
+  const eq = (a, b) => {
+    const ab = Buffer.from(String(a));
+    const bb = Buffer.from(String(b));
+    if (ab.length !== bb.length) return false;
+    return require('crypto').timingSafeEqual(ab, bb);
+  };
+  if (!eq(user, CFG.callbackUser) || !eq(pass, CFG.callbackPass)) {
+    return { ok: false, reason: 'bad credentials' };
+  }
+  return { ok: true };
+}
+
+/* Paragon retries every 5 seconds for up to 9 attempts until it gets a 200.
+   We answer 200 immediately and do the work afterwards, so a retry should be
+   rare — but a slow or lost ACK would replay a payment we have already
+   handled, and the student would get a second text and a second email.
+   Remember what we have processed and ignore repeats.
+
+   In-memory deliberately: one Railway instance, and a restart losing this
+   costs at most a duplicate notification. A second replica would need shared
+   state — revisit then, not before. */
+const processedCallbacks = new Map();
+const CALLBACK_MEMORY_MS = 60 * 60 * 1000;
+
+function alreadyProcessed(key) {
+  if (!key) return false;
+  const now = Date.now();
+  for (const [k, seenAt] of processedCallbacks) {
+    if (now - seenAt > CALLBACK_MEMORY_MS) processedCallbacks.delete(k);
+  }
+  if (processedCallbacks.has(key)) return true;
+  processedCallbacks.set(key, now);
+  return false;
+}
+
 /* --- Twilio SMS ---
    Transactional only for now: a confirmation of a purchase the student just
    made. Nothing promotional goes out on this path, because the consent
@@ -963,7 +1021,7 @@ const server = http.createServer(async (req, res) => {
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
       'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
       'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS', 'STUDENT_CHECKOUT_URL',
-      'STUDIO_LOGO_URL'];
+      'STUDIO_LOGO_URL', 'CALLBACK_USER', 'CALLBACK_PASS'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
 
@@ -1146,11 +1204,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* Paragon's "Transaction Create" callback. Set this URL in PUREsight →
-     Hosted Page → Fields → Callback URL.
-     NOT AUTHENTICATED YET — anyone who learns this URL can post a forged
-     payment. PUREsight → Administration → Keys holds HMAC keys; wire
-     signature verification before real money moves. */
+     Hosted Page → Fields → Callback URL, with the basic auth username and
+     password that CALLBACK_USER / CALLBACK_PASS must match. */
   if (req.method === 'POST' && url.pathname === '/paragon-callback') {
+    const auth = callbackAuthorized(req);
+    if (!auth.ok) {
+      console.error('CALLBACK REJECTED', auth.reason);
+      /* 401, not 200 — a forged call must not be recorded as delivered, and a
+         genuine call with a misconfigured password should retry rather than be
+         silently swallowed. */
+      res.writeHead(401, Object.assign({ 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Basic realm="sfo2"' }, cors));
+      return res.end('Unauthorized');
+    }
+    if (auth.unguarded) {
+      console.warn('CALLBACK UNGUARDED — set CALLBACK_USER and CALLBACK_PASS before production');
+    }
+
     let body = {};
     try {
       const raw = await readBody(req, 64 * 1024);
@@ -1166,10 +1235,19 @@ const server = http.createServer(async (req, res) => {
     const query = Object.fromEntries(url.searchParams);
     const payment = parseCallback(body, query);
 
-    /* Always acknowledge. A non-2xx here could make Paragon retry or, worse,
-       treat the payment as unsettled — the money has already moved. */
+    /* Acknowledge immediately. Paragon retries every 5s for up to 9 attempts
+       until it sees a 200, so answering before doing the work is what keeps
+       a slow Airtable or Twilio call from triggering duplicates. */
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain' }, cors));
     res.end('OK');
+
+    /* A replay of something already handled stops here — after the 200, so
+       Paragon still sees success. */
+    const dedupeKey = payment.pnref || (payment.invoice_number ? payment.invoice_number + ':' + (payment.result || '') : null);
+    if (alreadyProcessed(dedupeKey)) {
+      console.log('callback duplicate ignored', dedupeKey);
+      return;
+    }
 
     const airtableResult = payment.invoice_number
       ? await markLeadPaid(payment.invoice_number, payment)
