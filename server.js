@@ -141,9 +141,11 @@ const smsConfigured = () =>
   Boolean(CFG.twilioSid && CFG.twilioToken && CFG.twilioFrom);
 
 /* --- Student welcome email content ---
-   All of this is configuration rather than code, because the registration
-   steps are Mario's to define and will change before they are right.
-   WL_STEPS is pipe-separated; each item becomes a numbered step. */
+   All of this is configuration rather than code, because the wording is
+   Mario's to define and will change before it is right.
+   The numbered WL_STEPS list was removed on 2026-09-23: with the real signup
+   URL in place the email says one thing and links to it, so the steps were
+   restating a page the student is already looking at. */
 CFG.studioPageUrl = process.env.STUDIO_PAGE_URL || 'https://salsafeveron2.com';
 CFG.logoUrl = process.env.STUDIO_LOGO_URL ||
   'https://salsafeveron2.com/wp-content/uploads/2018/12/sf-logo.png';
@@ -154,13 +156,12 @@ CFG.checkoutUrl = process.env.STUDENT_CHECKOUT_URL ||
   'https://www.baseops.tech/salsaFeverOn2Promotion/checkout';
 /* Replies from students should reach the studio, not our sending address. */
 CFG.studioReplyTo = process.env.STUDIO_REPLY_TO || 'sfon2services@gmail.com';
-CFG.wlSignupUrl = process.env.WL_SIGNUP_URL || '';
-CFG.wlSteps = (process.env.WL_STEPS || [
-  'Open the link above and choose Sign up',
-  'Use the same name and email you gave us when you paid, so we can match your pass to your profile',
-  'Once your profile exists we will add your 5-class pass to it',
-  'Book your first class from the schedule, or just turn up and we will sort it out'
-].join('|')).split('|').map(s => s.trim()).filter(Boolean);
+/* The studio's real WellnessLiving signup page. Defaulted in code rather than
+   left to an env var: an unset value used to fall back to "we will send the link
+   separately", which contradicted the numbered steps telling students to open a
+   link that was not there. Override per-environment with WL_SIGNUP_URL. */
+CFG.wlSignupUrl = process.env.WL_SIGNUP_URL ||
+  'https://www.wellnessliving.com/signup/salsa_fever_on2_dance_academy-bn22o6';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -785,22 +786,18 @@ async function sendStudentRegistrationEmail(lead) {
 /* Sent to the student after a successful payment. Deliberately does NOT claim
    the pass is already on their WellnessLiving profile — on the Paragon path it
    is not, and telling them otherwise would send them to a class they cannot
-   book. */
-async function sendStudentWelcome(fields, payment) {
-  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
-  const to = fields.Email;
-  if (!to) return { ok: false, error: 'no email on the matched row' };
+   book.
 
+   Content lives in its own builder so /preview/welcome-email can render it
+   without taking a payment. The "open the link above" bug reached a real
+   student because this email could previously only be seen by paying for it. */
+function buildWelcomeEmail(fields, payment) {
   const first = fields['First Name'] || 'there';
   const upcoming = nextClasses(3);
 
-  const stepsHtml = CFG.wlSteps
-    .map((s, i) => '<li style="margin:0 0 9px;padding-left:4px">' + esc(s) + '</li>')
-    .join('');
-
   const linkLine = CFG.wlSignupUrl
     ? '<p style="margin:0 0 14px"><a href="' + esc(CFG.wlSignupUrl) +
-      '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:999px">Set up your profile</a></p>'
+      '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:11px 20px;border-radius:999px">Create your account</a></p>'
     : '<p style="margin:0 0 14px;color:#B3312A;font-size:14px">We will send you the sign-up link separately — or just call the studio and we will do it with you.</p>';
 
   const html = '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:600px;margin:0 auto;padding:22px;color:#1a1a1a">' +
@@ -823,9 +820,8 @@ async function sendStudentWelcome(fields, payment) {
     'Wear socks or suede-soled shoes. No partner needed — most people arrive on their own.</p>' +
 
     '<h3 style="font-size:15px;margin:0 0 8px">One thing to do before your first class</h3>' +
-    '<p style="margin:0 0 12px;font-size:15px;line-height:1.65">Set up your profile so we can attach your pass and book you in.</p>' +
+    '<p style="margin:0 0 12px;font-size:15px;line-height:1.65">To save time when you arrive, please create your account here.</p>' +
     linkLine +
-    '<ol style="margin:0 0 20px;padding-left:20px;font-size:14.5px;line-height:1.6;color:#333">' + stepsHtml + '</ol>' +
 
     '<div style="background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px;font-size:14px;line-height:1.6">' +
     'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(payment.invoice_number || '') + '</b>' +
@@ -834,7 +830,7 @@ async function sendStudentWelcome(fields, payment) {
 
     '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Any questions at all, call or text <a href="tel:' +
     esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
-    'See you on the floor.</p>' +
+    'See you at the studio!</p>' +
     '</div></div>';
 
   const text = [
@@ -851,16 +847,25 @@ async function sendStudentWelcome(fields, payment) {
     'Wear socks or suede-soled shoes. No partner needed.',
     '',
     'BEFORE YOUR FIRST CLASS',
-    'Set up your profile so we can attach your pass:',
+    'To save time when you arrive, please create your account here:',
     CFG.wlSignupUrl || '(we will send you the link separately)',
-    ...CFG.wlSteps.map((s, i) => (i + 1) + '. ' + s),
     '',
     'Reference: ' + (payment.invoice_number || ''),
     payment.amount ? ('Paid: $' + payment.amount) : '',
     '',
     'Questions: ' + CFG.studioPhone,
-    'See you on the floor.'
+    'See you at the studio!'
   ].filter(l => l !== '').join('\n');
+
+  return { subject: "You're in — your Salsa Fever On2 classes are booked", html, text };
+}
+
+async function sendStudentWelcome(fields, payment) {
+  if (!CFG.resendKey) return { ok: false, error: 'RESEND_API_KEY not set' };
+  const to = fields.Email;
+  if (!to) return { ok: false, error: 'no email on the matched row' };
+
+  const { subject, html, text } = buildWelcomeEmail(fields, payment);
 
   try {
     const res = await fetch('https://api.resend.com/emails', {
@@ -870,7 +875,7 @@ async function sendStudentWelcome(fields, payment) {
         from: CFG.mailFrom,
         to: [to],
         reply_to: CFG.studioReplyTo || undefined,
-        subject: "You're in — your Salsa Fever On2 classes are booked",
+        subject,
         html, text
       })
     });
@@ -1030,7 +1035,7 @@ const server = http.createServer(async (req, res) => {
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
       'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
-      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'WL_STEPS', 'STUDENT_CHECKOUT_URL',
+      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'STUDENT_CHECKOUT_URL',
       'STUDIO_LOGO_URL', 'CALLBACK_USER', 'CALLBACK_PASS'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
@@ -1065,6 +1070,30 @@ const server = http.createServer(async (req, res) => {
       valid: true
     };
     const { subject, html, text } = buildRegistrationEmail(sample);
+
+    if (url.searchParams.get('format') === 'text') {
+      res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, cors));
+      return res.end('SUBJECT: ' + subject + '\n\n' + text);
+    }
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
+    return res.end(
+      '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f4;padding:18px">' +
+      '<div style="max-width:600px;margin:0 auto 14px;font-size:13px;color:#555">' +
+      '<b>Subject:</b> ' + esc(subject) + '<br><b>From:</b> ' + esc(CFG.mailFrom) +
+      ' &nbsp;<b>Reply-to:</b> ' + esc(CFG.studioReplyTo || '—') + '</div>' +
+      html + '</div>');
+  }
+
+  if (req.method === 'GET' && url.pathname === '/preview/welcome-email') {
+    const sampleFields = {
+      'First Name': url.searchParams.get('name') || 'Maria',
+      Email: 'student@example.com'
+    };
+    const samplePayment = {
+      invoice_number: url.searchParams.get('ref') || 'SFO2-K7M2QX',
+      amount: url.searchParams.get('amount') || String(CFG.price)
+    };
+    const { subject, html, text } = buildWelcomeEmail(sampleFields, samplePayment);
 
     if (url.searchParams.get('format') === 'text') {
       res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain; charset=utf-8' }, cors));
