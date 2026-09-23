@@ -631,18 +631,28 @@ function parseCallback(body, query) {
     }
     return null;
   };
+  /* Field names below lead with the ones DOCUMENTED in "Webhook Notification Guide
+     v1.2", §Transaction Create Parameters (p.11). The looser aliases that follow are
+     kept only as belt-and-braces — they were guesses made before we had the guide, and
+     one of those guesses is why the first approved transaction (SFO2-CH9FR4, 2026-09-23)
+     was never marked paid: we looked for `invoice_number` and Paragon sends `invoice_id`.
+     The documented payload carries NO echo field, so `invoice_id` is the ONLY join key
+     back to the Airtable row. Treat it as load-bearing. */
   const result = pick('result', 'respcode', 'responsecode');
   return {
-    invoice_number: pick('invoicenumber', 'invnum', 'invoice_number', 'invoice'),
+    invoice_number: pick('invoice_id', 'invoiceid',
+                         'invoicenumber', 'invnum', 'invoice_number', 'invoice'),
     echo_id: pick('echoid', 'echo_id'),
-    pnref: pick('pnref', 'payment_reference_number', 'transactionid'),
+    pnref: pick('payment_reference_number', 'pnref', 'transaction_id', 'transactionid'),
     result,
-    resp_message: pick('respmsg', 'message', 'result_message'),
-    amount: pick('amount', 'amt'),
-    auth_code: pick('authcode', 'authorization_code', 'approval_code'),
+    resp_message: pick('result_description', 'respmsg', 'message', 'result_message'),
+    amount: pick('total_amount', 'authorized_amount', 'amount', 'amt'),
+    auth_code: pick('authorization_code', 'authcode', 'approval_code'),
     last_four: pick('lastfour', 'last4', 'card_number_last_four_digits'),
-    card_type: pick('cardtype', 'card_type'),
+    card_type: pick('card_type', 'cardtype'),
     customer_name: pick('customername', 'name_on_card', 'customer_name'),
+    merchant_key: pick('merchant_key', 'merchantkey'),
+    txn_date: pick('date'),
     approved: result === '0',
     received_at: new Date().toISOString()
   };
