@@ -56,6 +56,26 @@ const CFG = {
     'https://stage.shpp.paragonsolutions.com/payment'
 };
 
+/* What the card is actually debited, deliberately allowed to differ from the
+   advertised price so the PRODUCTION payment path can be exercised with real
+   cards for pennies. Test cards do not work against a live merchant account,
+   so this is the only way to prove the production wiring without moving $75 a
+   go and refunding it each time.
+
+   OFFER_PRICE  is what every student-facing surface says.
+   CHARGE_PRICE is what the card is debited.
+
+   Leave CHARGE_PRICE unset and they are the same number, which is the correct
+   state for anything but a trial.
+
+   This is a loaded gun. While the two differ, the live page sells a $75 pass
+   for whatever CHARGE_PRICE says, and anyone who reaches checkout pays that.
+   It is deliberately noisy: the startup log shouts, /healthz reports it, and
+   every internal payment notification is prefixed, so it cannot sit here
+   quietly after the trial ends. */
+CFG.chargePrice = Number(process.env.CHARGE_PRICE || CFG.price);
+CFG.priceDiverged = CFG.chargePrice !== CFG.price;
+
 const paragonConfigured = () =>
   Boolean(CFG.paragonUser && CFG.paragonPass && CFG.paragonMerchantKey);
 
@@ -317,7 +337,9 @@ function normalise(body) {
     consent_timestamp: consent ? new Date().toISOString() : null,
     consent_text_version: consent ? (clean(b.consent_text_version) || 'v1-2026-08') : null,
     offer: '5-class-pass',
-    amount: CFG.price,
+    /* The figure that will actually be billed, so the Airtable row reconciles
+       against Paragon rather than against the advertised price. */
+    amount: CFG.chargePrice,
     invoice_number: makeInvNum(),
     status: 'new',
     intent: clean(b.intent) || 'checkout',
@@ -524,8 +546,11 @@ async function mintParagonToken(lead) {
       body: JSON.stringify({
         username: CFG.paragonUser,
         password: CFG.paragonPass,
-        /* Binds the amount to the token so it cannot be edited in the URL. */
-        extendedInfo: { transactionInfo: { amount: CFG.price.toFixed(2) } }
+        /* Binds the amount to the token so it cannot be edited in the URL.
+           chargePrice, not price: this is money, not marketing. Must match the
+           Amount query param in buildPaymentUrl below or Paragon is handed two
+           different figures for one transaction. */
+        extendedInfo: { transactionInfo: { amount: CFG.chargePrice.toFixed(2) } }
       }),
       signal: ac.signal
     });
@@ -555,7 +580,8 @@ function buildPaymentUrl(token, lead) {
   const q = new URLSearchParams({
     SecureToken: token,
     MerchantKey: CFG.paragonMerchantKey,
-    Amount: CFG.price.toFixed(2),
+    /* Must equal the amount bound to the token above. */
+    Amount: CFG.chargePrice.toFixed(2),
     InvoiceNumber: lead.invoice_number,   /* join key back to the Airtable row */
     EchoID: lead.source,                  /* echoed back on the callback */
     Email: lead.email,
@@ -892,11 +918,17 @@ async function sendPaymentEmail(payment, raw, airtableResult, studentSms, studen
   if (!CFG.resendKey) return [{ ok: false, error: 'RESEND_API_KEY not set' }];
 
   const matched = Boolean(payment.invoice_number);
-  const subject = !matched
+  /* While CHARGE_PRICE differs from the advertised price, say so on every
+     notification. A trial price left in place after the trial is the expensive
+     mistake here, and this is the line most likely to be read. */
+  const trialTag = CFG.priceDiverged
+    ? '[TRIAL PRICING $' + CFG.chargePrice.toFixed(2) + '] '
+    : '';
+  const subject = trialTag + (!matched
     ? '[UNMATCHED] SFO2 payment — no reference in callback'
     : (payment.approved
       ? 'SFO2 PAID — ' + payment.invoice_number + ' — $' + (payment.amount || '?')
-      : '[CHECK] SFO2 payment not approved — ' + payment.invoice_number + ' — result ' + (payment.result || '?'));
+      : '[CHECK] SFO2 payment not approved — ' + payment.invoice_number + ' — result ' + (payment.result || '?')));
 
   const row = (k, v) =>
     '<tr><td style="padding:9px 14px;border-bottom:1px solid #eee;color:#666;font-size:13px;white-space:nowrap">' +
@@ -1030,7 +1062,7 @@ const server = http.createServer(async (req, res) => {
        variable set on the wrong service or a deploy that never picked it up. */
     const expected = ['RESEND_API_KEY', 'MAIL_FROM', 'LEAD_TO',
       'AIRTABLE_TOKEN', 'AIRTABLE_BASE', 'AIRTABLE_TABLE',
-      'ALLOWED_ORIGINS', 'OFFER_PRICE',
+      'ALLOWED_ORIGINS', 'OFFER_PRICE', 'CHARGE_PRICE',
       'PARAGON_HP_USER', 'PARAGON_HP_PASS', 'PARAGON_MERCHANT_KEY',
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
@@ -1050,6 +1082,13 @@ const server = http.createServer(async (req, res) => {
         airtable: Boolean(CFG.airtableToken && CFG.airtableBase && CFG.airtableTable),
         paragon: paragonConfigured(),
         sms: smsConfigured()
+      },
+      pricing: {
+        advertised: CFG.price,
+        charged: CFG.chargePrice,
+        /* true means the live page is selling the advertised offer for less.
+           Expected only during a production payment trial. */
+        trial_pricing_active: CFG.priceDiverged
       },
       next_class: nextClassText(),
       env_present: present,
@@ -1340,4 +1379,14 @@ server.listen(PORT, () => {
     ' from=' + (CFG.mailFrom || 'MISSING') +
     ' recipients=' + CFG.leadTo.length +
     ' airtable=' + (CFG.airtableToken ? 'configured' : 'MISSING'));
+
+  if (CFG.priceDiverged) {
+    console.warn('');
+    console.warn('*** TRIAL PRICING ACTIVE ***');
+    console.warn('    advertised $' + CFG.price.toFixed(2) +
+      '  but charging $' + CFG.chargePrice.toFixed(2));
+    console.warn('    Anyone who reaches checkout pays the lower figure.');
+    console.warn('    Unset CHARGE_PRICE when the trial ends.');
+    console.warn('');
+  }
 });
