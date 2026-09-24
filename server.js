@@ -172,8 +172,13 @@ CFG.logoUrl = process.env.STUDIO_LOGO_URL ||
 /* Where the student goes to complete the purchase. Their reference is appended
    as ?ref=, which is what makes this link resumable — they can close the tab
    and come back days later without losing their place. */
+/* Points at the Paragon promo page, not /salsaFeverOn2Promotion/checkout.
+   That path is the WellnessLiving widget, where a payment reports nothing back
+   to us, so an abandoning student who returned through this link used to
+   disappear into the uninstrumented path. The page resumes from the ?ref via
+   POST /resume, which reuses their existing reference. */
 CFG.checkoutUrl = process.env.STUDENT_CHECKOUT_URL ||
-  'https://www.baseops.tech/salsaFeverOn2Promotion/checkout';
+  'https://www.baseops.tech/salsaFeverOn2Promotion';
 /* Replies from students should reach the studio, not our sending address. */
 CFG.studioReplyTo = process.env.STUDIO_REPLY_TO || 'sfon2services@gmail.com';
 /* The studio's real WellnessLiving signup page. Defaulted in code rather than
@@ -595,6 +600,33 @@ function buildPaymentUrl(token, lead) {
    The n8n version of this once updated the WRONG row because a filter was
    silently ignored, so the returned record's Reference is re-checked here
    before anything is written. */
+/* Look up a lead by its reference without touching it. Used by /resume so a
+   student returning from the confirmation email picks up their EXISTING
+   reference rather than filling the form again and creating a second row. */
+async function findLeadByReference(invoiceNumber) {
+  if (!CFG.airtableToken || !invoiceNumber) {
+    return { ok: false, error: 'missing token or reference' };
+  }
+  const baseUrl = 'https://api.airtable.com/v0/' + CFG.airtableBase + '/' + CFG.airtableTable;
+  const formula = '{Reference}="' + invoiceNumber.replace(/"/g, '') + '"';
+  try {
+    const res = await fetch(baseUrl + '?maxRecords=1&filterByFormula=' + encodeURIComponent(formula), {
+      headers: { 'Authorization': 'Bearer ' + CFG.airtableToken }
+    });
+    const body = await res.json();
+    const rec = (body.records || [])[0];
+    if (!rec) return { ok: false, error: 'no row for ' + invoiceNumber };
+    /* Same exact-match guard as markLeadPaid: Airtable's formula match is not
+       case sensitive, and a near-miss must not resume somebody else's row. */
+    if (String(rec.fields && rec.fields.Reference).trim() !== invoiceNumber.trim()) {
+      return { ok: false, error: 'reference mismatch' };
+    }
+    return { ok: true, id: rec.id, fields: rec.fields || {} };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message) };
+  }
+}
+
 async function markLeadPaid(invoiceNumber, payment) {
   if (!CFG.airtableToken || !invoiceNumber) {
     return { ok: false, error: 'missing token or reference' };
@@ -1357,6 +1389,63 @@ const server = http.createServer(async (req, res) => {
   /* Paragon's "Transaction Create" callback. Set this URL in PUREsight →
      Hosted Page → Fields → Callback URL, with the basic auth username and
      password that CALLBACK_USER / CALLBACK_PASS must match. */
+  /* Resume an existing checkout from its reference.
+
+     The confirmation email's "complete your purchase" link carries ?ref, and
+     without this the student would land on a blank form, fill it again, and
+     create a SECOND lead row with a new reference while the first sits
+     orphaned. This mints a fresh token against the row they already have.
+
+     Read-only against Airtable: it never writes, so a resume cannot corrupt a
+     row, and an already-paid reference is refused rather than charged twice. */
+  if (req.method === 'POST' && url.pathname === '/resume') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req, 8 * 1024) || '{}'); } catch (e) { body = {}; }
+    const ref = clean(body.ref || url.searchParams.get('ref')).toUpperCase();
+
+    if (!/^SFO2-[A-Z0-9]{6}$/.test(ref)) {
+      return json(400, { ok: false, error: 'invalid reference' });
+    }
+    if (!paragonConfigured()) {
+      return json(503, { ok: false, error: 'payment not available' });
+    }
+
+    const found = await findLeadByReference(ref);
+    if (!found.ok) {
+      /* Deliberately vague to the caller: this endpoint takes a guessable-ish
+         identifier, so it should not confirm which references exist. */
+      return json(404, { ok: false, error: 'reference not found' });
+    }
+
+    const status = String(found.fields.Status || '').toLowerCase();
+    if (status === 'paid') {
+      return json(200, { ok: true, already_paid: true, payment_url: null });
+    }
+
+    const lead = {
+      valid: true,
+      invoice_number: ref,
+      email: found.fields.Email || '',
+      first_name: found.fields['First Name'] || '',
+      last_name: found.fields['Last Name'] || '',
+      source: found.fields.Source || 'direct'
+    };
+
+    const { token, error } = await mintParagonToken(lead);
+    if (!token) {
+      console.error('RESUME TOKEN FAILED', ref, error);
+      return json(502, { ok: false, error: 'could not start checkout' });
+    }
+
+    return json(200, {
+      ok: true,
+      already_paid: false,
+      invoice_number: ref,
+      first_name: lead.first_name,
+      payment_url: buildPaymentUrl(token, lead)
+    });
+  }
+
   if (req.method === 'POST' && url.pathname === '/paragon-callback') {
     const auth = callbackAuthorized(req);
     if (!auth.ok) {
