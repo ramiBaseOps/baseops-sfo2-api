@@ -1028,15 +1028,65 @@ async function connectivityProbe() {
   };
   const [egress, paragon] = await Promise.all([
     check('egress', 'https://ifconfig.co/json'),
-    check('paragon_token_endpoint', 'https://stage.paragonsolutions.com/api/v2/hp/token', {
+    /* Whatever environment is actually configured, not a hardcoded stage host.
+       Dummy credentials on purpose: this asks "does the endpoint answer", and a
+       rejection is a perfectly good answer. */
+    check('paragon_token_endpoint', CFG.paragonTokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: 'probe', password: 'probe' })
     })
   ]);
+
+  /* Pre-flight for the real credentials. Minting a token moves no money and the
+     token expires in five minutes unused, so this is free to run, and it is the
+     only way to prove the configured credentials, token URL and merchant setup
+     actually work BEFORE somebody types a card number.
+
+     The token itself is never returned: a leaked token is five minutes of
+     access to a payment page bound to our amount. */
+  let auth = { attempted: false, reason: 'paragon not configured' };
+  if (paragonConfigured()) {
+    const started = Date.now();
+    try {
+      const res = await fetch(CFG.paragonTokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: CFG.paragonUser,
+          password: CFG.paragonPass,
+          extendedInfo: { transactionInfo: { amount: CFG.chargePrice.toFixed(2) } }
+        })
+      });
+      const text = await res.text();
+      let token = null;
+      try {
+        const parsed = JSON.parse(text);
+        token = parsed.token || parsed.secureToken || parsed.SecureToken || null;
+      } catch (e) { /* non-JSON body handled below */ }
+      auth = {
+        attempted: true,
+        http_status: res.status,
+        token_issued: Boolean(token),
+        ms: Date.now() - started,
+        /* Only surfaced when no token came back, so this carries an error, not a token. */
+        detail: token ? null : text.slice(0, 200)
+      };
+    } catch (err) {
+      auth = { attempted: true, token_issued: false, error: String(err && err.message) };
+    }
+  }
+
   let country = null;
   try { country = JSON.parse(egress.body || '{}').country_iso || null; } catch (e) {}
-  return { egress_country: country, paragon_reachable: paragon.ok, checks: [egress, paragon] };
+  return {
+    egress_country: country,
+    token_url: CFG.paragonTokenUrl,
+    pay_base: CFG.paragonPayBase,
+    paragon_reachable: paragon.ok,
+    paragon_credentials: auth,
+    checks: [egress, paragon]
+  };
 }
 
 /* ----------------------------------------------------------------- server */
