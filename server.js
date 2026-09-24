@@ -146,6 +146,10 @@ CFG.twilioSid = process.env.TWILIO_ACCOUNT_SID || '';
 CFG.twilioToken = process.env.TWILIO_AUTH_TOKEN || '';
 CFG.twilioFrom = process.env.TWILIO_FROM || '';
 CFG.studioPhone = process.env.STUDIO_PHONE || '201-792-1616';
+/* Texts go to a different line from calls. Kept separate rather than replacing
+   studioPhone, because the call number is the one students are told to ring to
+   confirm a class, and the two must not drift into each other. */
+CFG.studioTextPhone = process.env.STUDIO_TEXT_PHONE || '201-801-3499';
 CFG.studioAddress = process.env.STUDIO_ADDRESS || '83 Franklin St, Jersey City';
 
 /* "dow:hour:label" entries, comma separated. Sunday = 0.
@@ -784,8 +788,10 @@ function buildRegistrationEmail(lead) {
     'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(lead.invoice_number) + '</b><br>' +
     'Quote it if you call the studio and we\'ll find you right away.</div>' +
 
-    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Questions? Call or text <a href="tel:' +
-    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
+    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Questions? Call <a href="tel:' +
+    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) +
+    '</a> or text <a href="sms:+1' + esc(CFG.studioTextPhone.replace(/\D/g, '')) +
+    '" style="color:#111;font-weight:700">' + esc(CFG.studioTextPhone) + '</a>.<br>' +
     'See you on the floor.</p>' +
     '</div></div>';
 
@@ -806,7 +812,7 @@ function buildRegistrationEmail(lead) {
     '',
     'Your reference: ' + lead.invoice_number,
     '',
-    'Questions: ' + CFG.studioPhone,
+    'Questions: call ' + CFG.studioPhone + ' or text ' + CFG.studioTextPhone,
     'See you on the floor.'
   ].join('\n');
 
@@ -885,8 +891,10 @@ function buildWelcomeEmail(fields, payment) {
     (payment.amount ? ' &nbsp;·&nbsp; Paid $' + esc(payment.amount) : '') +
     '<br>Quote it if you contact us about this purchase.</div>' +
 
-    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Any questions at all, call or text <a href="tel:' +
-    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) + '</a>.<br>' +
+    '<p style="margin:20px 0 0;font-size:14px;line-height:1.7">Any questions at all, call <a href="tel:' +
+    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) +
+    '</a> or text <a href="sms:+1' + esc(CFG.studioTextPhone.replace(/\D/g, '')) +
+    '" style="color:#111;font-weight:700">' + esc(CFG.studioTextPhone) + '</a>.<br>' +
     'See you at the studio!</p>' +
     '</div></div>';
 
@@ -911,7 +919,7 @@ function buildWelcomeEmail(fields, payment) {
     'Reference: ' + (payment.invoice_number || ''),
     payment.amount ? ('Paid: $' + payment.amount) : '',
     '',
-    'Questions: ' + CFG.studioPhone,
+    'Questions: call ' + CFG.studioPhone + ' or text ' + CFG.studioTextPhone,
     'See you at the studio!'
   ].filter(l => l !== '').join('\n');
 
@@ -1172,7 +1180,7 @@ const server = http.createServer(async (req, res) => {
       'PARAGON_TOKEN_URL', 'PARAGON_PAY_BASE',
       'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM',
       'CLASS_SCHEDULE', 'STUDIO_PHONE', 'STUDIO_ADDRESS',
-      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'STUDENT_CHECKOUT_URL',
+      'STUDIO_PAGE_URL', 'WL_SIGNUP_URL', 'STUDENT_CHECKOUT_URL', 'STUDIO_TEXT_PHONE',
       'STUDIO_LOGO_URL', 'CALLBACK_USER', 'CALLBACK_PASS'];
     const present = {};
     expected.forEach(k => { present[k] = Boolean(process.env[k] && String(process.env[k]).trim()); });
