@@ -769,7 +769,6 @@ function buildRegistrationEmail(lead) {
 
     '<p style="margin:0 0 10px"><a href="' + esc(payLink) +
     '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 24px;border-radius:999px;font-size:15px">Complete your purchase — $' + CFG.price + '</a></p>' +
-    '<p style="margin:0 0 20px;font-size:13.5px;color:#666;line-height:1.6">Prefer to pay in person? Just show up. Bring this email and settle up at the studio.</p>' +
 
     '<h3 style="font-size:15px;margin:0 0 8px">When classes run</h3>' +
     (upcoming.length
@@ -796,9 +795,6 @@ function buildRegistrationEmail(lead) {
     "We have your details. If you haven't already, there's one step left -",
     'complete your purchase and your 5 Pre-Beginner classes are yours:',
     payLink,
-    '',
-    'Prefer to pay in person? Just show up. Bring this email and settle up',
-    'at the studio.',
     '',
     'WHEN CLASSES RUN',
     upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
@@ -866,6 +862,13 @@ function buildWelcomeEmail(fields, payment) {
 
     '<p style="margin:0 0 18px;font-size:15px;line-height:1.65">Your payment went through and your <b>5 Pre-Beginner classes</b> are paid for. Here is everything you need.</p>' +
 
+    '<h3 style="font-size:15px;margin:0 0 10px">&#128073; Two simple things to do before class</h3>' +
+    '<p style="margin:0 0 10px;font-size:15px;line-height:1.65"><b>1.</b> Create your studio account so we can attach your pass.</p>' +
+    linkLine +
+    '<p style="margin:0 0 20px;font-size:15px;line-height:1.65"><b>2.</b> Call us at <a href="tel:' +
+    esc(CFG.studioPhone.replace(/\D/g, '')) + '" style="color:#111;font-weight:700">' + esc(CFG.studioPhone) +
+    '</a> to select and confirm your first class.</p>' +
+
     '<h3 style="font-size:15px;margin:0 0 8px">When to come</h3>' +
     (upcoming.length
       ? '<p style="margin:0 0 6px;font-size:15px;line-height:1.7">Your next chances to start:<br><b>' +
@@ -876,10 +879,6 @@ function buildWelcomeEmail(fields, payment) {
     '<h3 style="font-size:15px;margin:0 0 8px">Where</h3>' +
     '<p style="margin:0 0 18px;font-size:15px;line-height:1.7"><b>' + esc(CFG.studioAddress) + '</b><br>' +
     'Wear socks or suede-soled shoes. No partner needed — most people arrive on their own.</p>' +
-
-    '<h3 style="font-size:15px;margin:0 0 8px">One thing to do before your first class</h3>' +
-    '<p style="margin:0 0 12px;font-size:15px;line-height:1.65">To save time when you arrive, please create your account here.</p>' +
-    linkLine +
 
     '<div style="background:#FAFAFA;border:1px solid #eee;border-radius:8px;padding:14px;font-size:14px;line-height:1.6">' +
     'Your reference is <b style="font-family:ui-monospace,Menlo,monospace">' + esc(payment.invoice_number || '') + '</b>' +
@@ -896,6 +895,11 @@ function buildWelcomeEmail(fields, payment) {
     '',
     'Your payment went through and your 5 Pre-Beginner classes are paid for.',
     '',
+    'TWO SIMPLE THINGS TO DO BEFORE CLASS',
+    '1. Create your studio account so we can attach your pass:',
+    CFG.wlSignupUrl || '(we will send you the link separately)',
+    '2. Call us at ' + CFG.studioPhone + ' to select and confirm your first class.',
+    '',
     'WHEN TO COME',
     upcoming.length ? upcoming.join('\n') : 'Call the studio for the next class time.',
     'No cycle to wait for - come to whichever suits you.',
@@ -904,10 +908,6 @@ function buildWelcomeEmail(fields, payment) {
     CFG.studioAddress,
     'Wear socks or suede-soled shoes. No partner needed.',
     '',
-    'BEFORE YOUR FIRST CLASS',
-    'To save time when you arrive, please create your account here:',
-    CFG.wlSignupUrl || '(we will send you the link separately)',
-    '',
     'Reference: ' + (payment.invoice_number || ''),
     payment.amount ? ('Paid: $' + payment.amount) : '',
     '',
@@ -915,7 +915,7 @@ function buildWelcomeEmail(fields, payment) {
     'See you at the studio!'
   ].filter(l => l !== '').join('\n');
 
-  return { subject: "You're in — your Salsa Fever On2 classes are booked", html, text };
+  return { subject: "You're in! Get ready for your first salsa class.", html, text };
 }
 
 async function sendStudentWelcome(fields, payment) {
