@@ -1015,6 +1015,17 @@ function readBody(req, limitBytes) {
 
 /* ------------------------------------------------------------------ probe */
 
+/* Strips anything shaped like a secret out of a diagnostic body before it is
+   returned over HTTP. Currently GUIDs, which is what a Paragon SecureToken is.
+   A live token is five minutes of access to a payment page bound to our amount,
+   so it must never travel in a probe response. */
+function redactSecrets(s) {
+  return String(s || '').replace(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+    '[redacted]'
+  );
+}
+
 async function connectivityProbe() {
   const check = async (name, url, options) => {
     const started = Date.now();
@@ -1062,23 +1073,35 @@ async function connectivityProbe() {
       let token = null;
       try {
         const parsed = JSON.parse(text);
-        token = parsed.token || parsed.secureToken || parsed.SecureToken || null;
+        /* Same field list as mintParagonToken, Token included. Omitting that
+           capitalised form made this report token_issued:false against a
+           perfectly good token, and the "only on failure" rule below then
+           printed the token it had failed to recognise. */
+        token = parsed.token || parsed.Token || parsed.secureToken || parsed.SecureToken || null;
       } catch (e) { /* non-JSON body handled below */ }
       auth = {
         attempted: true,
         http_status: res.status,
         token_issued: Boolean(token),
         ms: Date.now() - started,
-        /* Only surfaced when no token came back, so this carries an error, not a token. */
-        detail: token ? null : text.slice(0, 200)
+        /* Redacted unconditionally rather than only on failure. A guard that
+           depends on correctly recognising success fails open the moment the
+           field is renamed, which is precisely what happened. */
+        detail: token ? null : redactSecrets(text.slice(0, 200))
       };
     } catch (err) {
       auth = { attempted: true, token_issued: false, error: String(err && err.message) };
     }
   }
 
+  /* Regex rather than JSON.parse: check() truncates every body to 200 chars, so
+     the egress JSON arrives structurally incomplete and parsing always threw,
+     which is why this reported null however healthy the egress was. The country
+     matters — Paragon's edge drops non-US traffic, which is why this service is
+     pinned to a US region in the first place. */
   let country = null;
-  try { country = JSON.parse(egress.body || '{}').country_iso || null; } catch (e) {}
+  const m = /"country_iso"\s*:\s*"([A-Za-z]{2})"/.exec(egress.body || '');
+  if (m) country = m[1];
   return {
     egress_country: country,
     token_url: CFG.paragonTokenUrl,
