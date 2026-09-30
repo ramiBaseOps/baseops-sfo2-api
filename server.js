@@ -16,16 +16,11 @@
  */
 
 const http = require('http');
-const nodemailer = require('nodemailer');
 
 const PORT = process.env.PORT || 3000;
 
 const CFG = {
-  smtpHost: process.env.SMTP_HOST || 'smtp.zoho.com',
-  smtpPort: Number(process.env.SMTP_PORT || 465),
-  smtpUser: process.env.SMTP_USER || '',
-  smtpPass: process.env.SMTP_PASS || '',
-  mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || '',
+  mailFrom: process.env.MAIL_FROM || '',
   leadTo: (process.env.LEAD_TO || '').split(',').map(s => s.trim()).filter(Boolean),
 
   /* Mail goes out over HTTP, not SMTP — Railway blocks outbound 465 and 587
@@ -436,23 +431,6 @@ function buildEmail(lead) {
   ].filter(l => l !== null).join('\n');
 
   return { subject, html, text };
-}
-
-/* Timeouts are not optional here. Without them nodemailer waits minutes on a
-   blocked port, which is how /lead first came to hang with no response.
-   Kept only for /selftest — Railway blocks outbound SMTP on 465 and 587, so
-   mail actually goes out over HTTP via Resend. */
-function makeTransport(port) {
-  return nodemailer.createTransport({
-    host: CFG.smtpHost,
-    port: port,
-    secure: port === 465,
-    requireTLS: port !== 465,
-    auth: { user: CFG.smtpUser, pass: CFG.smtpPass },
-    connectionTimeout: 8000,
-    greetingTimeout: 8000,
-    socketTimeout: 12000
-  });
 }
 
 /* One send per recipient rather than one message with several To: addresses.
@@ -1265,27 +1243,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   /* Which dependency is actually failing? Read-only: sends no mail, writes no
-     records. `?smtp=1` additionally retries the blocked SMTP ports, which is
-     only useful for re-confirming the Railway block. */
+     records. */
   if (req.method === 'GET' && url.pathname === '/selftest') {
-    const smtp = {};
-    if (url.searchParams.get('smtp') === '1') {
-      for (const port of [465, 587]) {
-        const started = Date.now();
-        try {
-          await makeTransport(port).verify();
-          smtp['port_' + port] = { ok: true, ms: Date.now() - started };
-        } catch (err) {
-          smtp['port_' + port] = {
-            ok: false,
-            ms: Date.now() - started,
-            error: String(err && err.message).slice(0, 200),
-            code: (err && err.code) || null
-          };
-        }
-      }
-    }
-
     let resend = { ok: false, error: 'RESEND_API_KEY not set' };
     if (CFG.resendKey) {
       const rStarted = Date.now();
@@ -1337,8 +1296,7 @@ const server = http.createServer(async (req, res) => {
       resend, airtable, twilio,
       mail_from: CFG.mailFrom,
       recipients: CFG.leadTo,
-      next_class: nextClassText(),
-      smtp
+      next_class: nextClassText()
     });
   }
 
