@@ -1,76 +1,70 @@
 # baseops-sfo2-api
 
-Backend for the Salsa Fever On2 promo funnel, hosted on Railway.
+Backend for the Salsa Fever On2 promo funnel. Runs on Railway (project `energetic-comfort`,
+service `baseops-sfo2-api`, US East). Pushing to `main` redeploys it.
 
-**Phase 1 (current): a connectivity probe.** Everything below describes it. If the probe passes,
-this same service grows into the real backend and the probe code is replaced:
+It replaced n8n Cloud, which could not reach Paragon from its London egress. See
+`../Paragon_Connectivity_Blocker.md` for that history.
 
-| Endpoint | Purpose | Status |
-|---|---|---|
-| `GET /` | connectivity probe | **live** |
-| `POST /lead` | lead → Zoho email + Airtable row, issues `SFO2-XXXXXX` | planned, replaces n8n |
-| `POST /paragon-token` | mints a Paragon `SecureToken` server-side | planned, blocked on this probe |
-| `POST /paragon-callback` | receives Paragon's transaction callback | planned |
-
-> **Credentials go in Railway environment variables — never in this repo.** `.env` is
-> gitignored. The n8n setup we are replacing kept the Paragon username and password inside a
-> workflow file that exported to disk in plaintext; do not recreate that.
+> **Credentials go in Railway environment variables, never in this repo.** `.env` is
+> gitignored. `.env.example` lists every variable with notes.
 
 ---
 
-## Phase 1 — the probe
+## Endpoints
 
-Answers one question: **can a US-region Railway service reach Paragon's API?**
+| Endpoint | Purpose |
+|---|---|
+| `POST /lead` | Landing-page form. Validates, issues `SFO2-XXXXXX`, writes the Airtable row, emails the studio and the student, mints a Paragon token and returns `payment_url` |
+| `POST /resume` | Resumes a registration from `?ref=` in the student's email link, reusing the existing row |
+| `POST /paragon-callback` | Paragon transaction callback. Basic auth via `CALLBACK_USER` / `CALLBACK_PASS`. Marks the row paid, sends the welcome email and SMS, notifies the studio |
+| `GET /` or `/healthz` | Which settings are present (names only, never values), pricing, next class |
+| `GET /selftest` | Live check of Resend, Airtable and Twilio. Read-only: sends nothing, writes nothing |
+| `GET /probe` | Paragon connectivity probe (egress IP and country, TLS, token endpoint) |
+| `GET /preview/registration-email`, `/preview/welcome-email` | Renders a student email with sample data. Add `?format=text` for the plain-text version |
 
-n8n Cloud could not — it egressed from London (`9.223.34.63`) and Paragon's edge reset every
-connection, including plain unauthenticated GETs. Paragon's own support attributed this to
-"IP's that route outside the US." Railway lets you choose a region; n8n Cloud does not.
+## Email
+
+All mail goes out through **Resend's HTTP API** from `MAIL_FROM`
+(`Salsa Fever On2 <info@baseops.tech>`). `baseops.tech` is verified in Resend, so the
+`info@` mailbox does not need to exist.
+
+| Email | To |
+|---|---|
+| New lead notification | each address in `LEAD_TO`, one message per address |
+| Registration email ("one step left") | the student |
+| Welcome email on payment | the student |
+| Payment notification | each address in `LEAD_TO` |
+
+Student replies go to `STUDIO_REPLY_TO`.
+
+There is **no SMTP path**. Railway blocks outbound 465 and 587, and the `baseops.tech`
+mailboxes moved from Zoho to Google Workspace in September 2026. The SMTP code and the
+nodemailer dependency were removed on 2026-09-29. `SMTP_USER` and `SMTP_PASS` in Railway are
+no longer read.
+
+Sending does not depend on the mailbox host. It relies on these DNS records staying in place
+when DNS is edited:
+
+- `resend._domainkey.baseops.tech` — Resend's DKIM key
+- `send.baseops.tech` — Resend's sending subdomain (SPF and bounce handling)
+- `_dmarc.baseops.tech` — currently `p=none`
+
+## Operating notes
+
+- **`CHARGE_PRICE`** makes the card charge differ from the advertised `OFFER_PRICE`. It is only
+  for trialling the production payment path. While it differs, startup logs, `/healthz` and
+  every payment notification flag it.
+- **Paragon stage amounts are response triggers, not prices.** See
+  `../Paragon_HPP_Integration_Notes.md` §7.
+- `CLASS_SCHEDULE`, studio phone numbers and links live in environment variables, so they can be
+  changed without a deploy.
 
 ## Deploy
 
-1. Railway → your project → **New** → **Empty Service**
-2. **Settings → Region → a US region** *(do this before the first deploy — region is what the
-   whole test turns on)*
-3. Deploy this folder. Either:
-   - `railway up` from inside `railway-probe/`, or
-   - push it to a repo and point the service at it
-4. **Settings → Networking → Generate Domain**
-5. Open the URL
+Push to `main`. Railway builds with Node 20 and runs `npm start`. After a deploy, check the
+startup line in the logs:
 
-No environment variables, no credentials, no dependencies.
-
-## Reading the result
-
-The response opens with a `verdict` block:
-
-```json
-{
-  "verdict": {
-    "egress_ip": "…",
-    "egress_country": "US",
-    "tls_version": "TLS 1.3",
-    "paragon_reachable": true
-  }
-}
 ```
-
-| `egress_country` | `paragon_reachable` | What it means |
-|---|---|---|
-| US | **true** | **Solved.** Move the token mint to Railway. No extra cost. |
-| US | false | Paragon runs an **allow-list**, not a geo filter. Needs Railway **Pro** (~$20/mo) for static outbound IPs, then ask Paragon to allow-list the three IPv4s. |
-| not US | either | Region didn't apply. Check Settings → Region and redeploy. |
-
-`paragon_token_endpoint` returning **HTTP 500 with `"Invalid Credentials."` is a pass**, not a
-failure. It means the request reached their application instead of being dropped at the edge.
-The credentials in the probe are deliberately fake.
-
-## After you have the answer
-
-Delete the service. It has no ongoing purpose, and it holds a public URL that runs outbound
-requests on every hit.
-
-## Context
-
-- `../Paragon_Connectivity_Blocker.md` — the full diagnosis and what has been ruled out
-- Static outbound IPs are **Pro plan only**: https://docs.railway.com/networking/static-outbound-ips
-- IPs are tied to the service's region, and change if the region changes
+email=resend from=Salsa Fever On2 <info@baseops.tech> recipients=2 airtable=configured
+```
